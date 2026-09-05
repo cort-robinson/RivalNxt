@@ -17,6 +17,11 @@ const api = vi.hoisted(() => ({
 }));
 
 vi.mock("../api", () => api);
+const activation = vi.hoisted(() => ({
+  previewActivation: vi.fn(async (entries: Record<string, string[]>) => ({ token: "reviewed", entries })),
+  applyActivation: vi.fn(async () => ({ updated: 1, missing: 0 })),
+}));
+vi.mock("../activationApi", () => activation);
 
 const mockStorage = new Map<string, string>();
 Object.defineProperty(global, "localStorage", {
@@ -47,106 +52,43 @@ beforeEach(() => {
   api.getLocalDownload.mockResolvedValue({ contents: [] });
 });
 
-describe("disableAllRemembering", () => {
-  it("records the loadout and switches every active download off", async () => {
-    api.listDownloads.mockResolvedValue([
-      { id: 1, active_paks: ["a.pak"] },
-      { id: 2, active_paks: ["b.pak", "c.pak"] },
-      { id: 3, active_paks: [] },
-    ]);
-
-    const { disabled, loadout } = await disableAllRemembering();
-
-    expect(disabled).toBe(2);
-    expect(loadout.activePaks).toBe(3);
-    expect(api.setActivePaks).toHaveBeenCalledWith(1, []);
-    expect(api.setActivePaks).toHaveBeenCalledWith(2, []);
-    // The already-inactive download is left alone.
-    expect(api.setActivePaks).not.toHaveBeenCalledWith(3, []);
-    expect(getLoadout(AUTO_LOADOUT_ID)?.entries).toEqual({
-      "1": ["a.pak"],
-      "2": ["b.pak", "c.pak"],
-    });
+describe("transactional loadout actions", () => {
+  it("saves the pre-disable selection before submitting one transaction", async () => {
+    api.listDownloads.mockResolvedValue([{ id: 1, active_paks: ["a.pak"] }]);
+    const result = await disableAllRemembering();
+    expect(result.disabled).toBe(1);
+    expect(getLoadout(AUTO_LOADOUT_ID)?.entries).toEqual({ "1": ["a.pak"] });
+    expect(activation.previewActivation).toHaveBeenCalledWith({});
+    expect(activation.applyActivation).toHaveBeenCalledWith(expect.objectContaining({ token: "reviewed" }));
+    expect(api.setActivePaks).not.toHaveBeenCalled();
   });
 
-  it("does not overwrite a saved loadout when nothing is active", async () => {
-    addLoadout(buildLoadout([{ id: 1, active_paks: ["a.pak"] }], "good", AUTO_LOADOUT_ID));
-    api.listDownloads.mockResolvedValue([{ id: 1, active_paks: [] }]);
+  it("does not overwrite the last real selection when already disabled", async () => {
+    addLoadout(buildLoadout([{ id: 1, active_paks: ["a.pak"] }], "saved", AUTO_LOADOUT_ID));
+    expect((await disableAllRemembering()).disabled).toBe(0);
+    expect(getLoadout(AUTO_LOADOUT_ID)?.entries).toEqual({ "1": ["a.pak"] });
+    expect(activation.applyActivation).not.toHaveBeenCalled();
+  });
 
-    const { disabled } = await disableAllRemembering();
-
-    expect(disabled).toBe(0);
-    expect(api.setActivePaks).not.toHaveBeenCalled();
-    // Clicking Disable All twice must not turn Restore into a no-op.
+  it("retains the remembered selection if disable fails", async () => {
+    api.listDownloads.mockResolvedValue([{ id: 1, active_paks: ["a.pak"] }]);
+    activation.applyActivation.mockRejectedValueOnce(new Error("rolled back"));
+    await expect(disableAllRemembering()).rejects.toThrow("rolled back");
     expect(getLoadout(AUTO_LOADOUT_ID)?.entries).toEqual({ "1": ["a.pak"] });
   });
-});
 
-describe("restoreLoadout", () => {
-  it("re-enables exactly the remembered paks", async () => {
-    const loadout = buildLoadout(
-      [
-        { id: 1, active_paks: ["a.pak"] },
-        { id: 2, active_paks: ["b.pak"] },
-      ],
-      "saved",
-      AUTO_LOADOUT_ID,
-    );
-    addLoadout(loadout);
-    api.listDownloads.mockResolvedValue([
-      { id: 1, active_paks: [] },
-      { id: 2, active_paks: [] },
-    ]);
-
-    const { updated, missing } = await restoreLoadout();
-
-    expect(updated).toBe(2);
-    expect(missing).toBe(0);
-    expect(api.setActivePaks).toHaveBeenCalledWith(1, ["a.pak"]);
-    expect(api.setActivePaks).toHaveBeenCalledWith(2, ["b.pak"]);
-  });
-
-  it("switches off anything enabled since the snapshot", async () => {
-    addLoadout(buildLoadout([{ id: 1, active_paks: ["a.pak"] }], "saved", AUTO_LOADOUT_ID));
-    api.listDownloads.mockResolvedValue([
-      { id: 1, active_paks: ["a.pak"] },
-      { id: 9, active_paks: ["stray.pak"] },
-    ]);
-
-    const { updated } = await restoreLoadout();
-
-    expect(updated).toBe(1);
-    expect(api.setActivePaks).toHaveBeenCalledWith(9, []);
-  });
-
-  it("counts mods that are no longer installed", async () => {
-    addLoadout(
-      buildLoadout(
-        [
-          { id: 1, active_paks: ["a.pak"] },
-          { id: 2, active_paks: ["b.pak"] },
-        ],
-        "saved",
-        AUTO_LOADOUT_ID,
-      ),
-    );
-    api.listDownloads.mockResolvedValue([{ id: 1, active_paks: [] }]);
-
-    const { updated, missing } = await restoreLoadout();
-
-    expect(updated).toBe(1);
-    expect(missing).toBe(1);
-  });
-
-  it("skips the filesystem resync when nothing changed", async () => {
-    addLoadout(buildLoadout([{ id: 1, active_paks: ["a.pak"] }], "saved", AUTO_LOADOUT_ID));
-    api.listDownloads.mockResolvedValue([{ id: 1, active_paks: ["a.pak"] }]);
-
-    const { updated } = await restoreLoadout();
-
-    expect(updated).toBe(0);
+  it("restores using the backend preview token without per-download mutations", async () => {
+    addLoadout(buildLoadout([{ id: 1, active_paks: ["variant/a.pak"] }], "saved", AUTO_LOADOUT_ID));
+    await restoreLoadout();
+    expect(activation.previewActivation).toHaveBeenCalledWith({ "1": ["variant/a.pak"] }, undefined);
+    expect(activation.applyActivation).toHaveBeenCalledWith(expect.objectContaining({ token: "reviewed" }));
     expect(api.setActivePaks).not.toHaveBeenCalled();
-    expect(api.refreshConflicts).not.toHaveBeenCalled();
+  });
+
+  it("propagates missing-download errors rather than claiming partial success", async () => {
+    addLoadout(buildLoadout([{ id: 1, active_paks: ["a.pak"] }], "saved", AUTO_LOADOUT_ID));
+    activation.applyActivation.mockRejectedValueOnce(new Error("Restore missing downloads"));
+    await expect(restoreLoadout()).rejects.toThrow("missing downloads");
   });
 
   it("rejects when there is nothing remembered", async () => {
@@ -226,7 +168,7 @@ describe("presets", () => {
     const { updated } = await restoreLoadout(preset);
 
     expect(updated).toBe(1);
-    expect(api.setActivePaks).toHaveBeenCalledWith(1, ["a.pak"]);
+    expect(activation.previewActivation).toHaveBeenCalledWith({ "1": ["a.pak"] }, undefined);
   });
 
   it("deletes a preset by id", async () => {

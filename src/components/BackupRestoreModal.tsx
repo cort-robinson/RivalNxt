@@ -1,3 +1,5 @@
+import { useActivationReview } from "./useActivationReview";
+import { previewBackupActivation } from "../lib/backupActivation";
 import { useEffect, useState, useRef } from "react";
 import {
   Dialog,
@@ -10,7 +12,7 @@ import { Badge } from "./ui/badge";
 import { toast } from "sonner";
 import { invokeReadTextFile } from "../lib/tauri-utils";
 import { computeRestoreDiff, type BackupMeta, type ModBackup } from "../lib/backupUtils";
-import { setActivePaks, scanActive, refreshConflicts, getLocalDownload, addModCustomTag, updateModDetails, uploadModImagesBase64, createOrUpdateAuthor, assignModAuthor } from "../lib/api";
+import { scanActive, refreshConflicts, addModCustomTag, updateModDetails, uploadModImagesBase64, createOrUpdateAuthor, assignModAuthor } from "../lib/api";
 import { Loader2, CheckCircle2, XCircle, RotateCcw } from "lucide-react";
 
 interface BackupRestoreModalProps {
@@ -23,6 +25,7 @@ interface BackupRestoreModalProps {
 type RestoreStatus = "idle" | "analyzing" | "restoring" | "finalizing" | "completed" | "error";
 
 export function BackupRestoreModal({ meta, installedMods, onComplete, onClose }: BackupRestoreModalProps) {
+  const { requestReview, dialog: backupFileReview } = useActivationReview();
   const [status, setStatus] = useState<RestoreStatus>("idle");
   const [progress, setProgress] = useState(0);
   const [currentModName, setCurrentModName] = useState("");
@@ -70,89 +73,12 @@ export function BackupRestoreModal({ meta, installedMods, onComplete, onClose }:
         toDisable: toDisable.length,
       });
 
-      if (totalOperations === 0) {
-        setStatus("completed");
-        setProgress(100);
-        setCurrentModName("Mods already match this backup.");
-        return;
-      }
-
-
+      const previewFiles = () => previewBackupActivation(backup, installedMods);
+      await requestReview(await previewFiles(), previewFiles);
       setStatus("restoring");
-      let completed = 0;
-      
-      // Process Disables (delta only — no nuclear sweep that would wipe all active mods)
-      for (const mod of toDisable) {
-        setCurrentModName(`Disabling ${mod.name}...`);
-        const downloadIds = mod.sourceDownloadIds || [];
-        for (const dlId of downloadIds) {
-          await setActivePaks(Number(dlId), []);
-        }
-        completed++;
-        setProgress(10 + Math.floor((completed / totalOperations) * 80));
-        setStats(s => ({ ...s, completed }));
-      }
-      
-
-      // Process Enables
-      for (const mod of toEnable) {
-        setCurrentModName(`Enabling ${mod.name}...`);
-
-        // Find matching backup entry to get exact activePaks + sourceDownloadIds that were saved
-        const backupEntry = backup.mods.find(e => {
-          if (e.backendModId != null && mod.backendModId != null) {
-            return e.backendModId === mod.backendModId;
-          }
-          if (e.sourceDownloadIds.length > 0 && Array.isArray(mod.sourceDownloadIds)) {
-            return e.sourceDownloadIds.some(id => mod.sourceDownloadIds.includes(id));
-          }
-          return String(e.modId) === String(mod.id);
-        });
-
-        // The download IDs that were part of this mod card AT THE TIME the backup was created.
-        // These are the only ones we should enable — any new dlIds merged into the card since
-        // the backup was made should remain inactive.
-        const backupDlIds = new Set<number>((backupEntry?.sourceDownloadIds || []).map(Number));
-
-        // Build a set of the exact pak basenames that were active when backup was saved
-        const backupActivePaks = backupEntry?.activePaks || [];
-        const backupActiveBases = new Set(backupActivePaks.map(p => {
-          const parts = p.split(/[\/\\]/);
-          return parts[parts.length - 1].toLowerCase();
-        }));
-
-        const currentDownloadIds = mod.sourceDownloadIds || [];
-        for (const dlId of currentDownloadIds) {
-          const numId = Number(dlId);
-
-          if (!backupDlIds.has(numId)) {
-            // This download was added to the card AFTER the backup — deactivate it
-            await setActivePaks(numId, []);
-            continue;
-          }
-
-          // This download existed at backup time — activate only the right paks
-          if (backupActiveBases.size > 0) {
-            // New backup format: filter this download's contents to only the recorded active variant paks
-            const dl = await getLocalDownload(numId);
-            const paks = (dl.contents || []).filter((f: string) => f.toLowerCase().endsWith(".pak"));
-            const targetPaks = paks.filter((p: string) => {
-              const parts = p.split(/[\/\\]/);
-              return backupActiveBases.has(parts[parts.length - 1].toLowerCase());
-            });
-            await setActivePaks(numId, targetPaks);
-          } else {
-            // Old backup format (no activePaks field): only enable downloads from the backup's
-            // own sourceDownloadIds. Use this download's full pak list as best-effort.
-            const dl = await getLocalDownload(numId);
-            const paks = (dl.contents || []).filter((f: string) => f.toLowerCase().endsWith(".pak"));
-            await setActivePaks(numId, paks);
-          }
-        }
-        completed++;
-        setProgress(10 + Math.floor((completed / totalOperations) * 80));
-        setStats(s => ({ ...s, completed }));
-      }
+      const completed = totalOperations;
+      setStats((value) => ({ ...value, completed }));
+      setProgress(90);
 
       // Restore custom user data (tags, description, images)
       setCurrentModName("Restoring custom data...");
@@ -296,6 +222,7 @@ export function BackupRestoreModal({ meta, installedMods, onComplete, onClose }:
       : "1px solid rgba(245,158,11,0.2)";
 
   return (
+    <>
     <Dialog open={!!meta} onOpenChange={(open) => !open && handleClose()}>
       <DialogContent
         className="w-[50vw] max-w-[50vw]"
@@ -628,6 +555,8 @@ export function BackupRestoreModal({ meta, installedMods, onComplete, onClose }:
         </div>
       </DialogContent>
     </Dialog>
+    {backupFileReview}
+    </>
   );
 }
 

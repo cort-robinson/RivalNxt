@@ -109,6 +109,27 @@ app = FastAPI(title="Mod Manager Backend", version=APP_VERSION)
 from core.api.characters import router as characters_router
 app.include_router(characters_router)
 
+from core.activity import install_activity, get_recent_operations
+install_activity(app, get_db)
+
+from core.diagnostics import install_diagnostics
+install_diagnostics(app, lambda: _get_current_settings(), lambda limit: list_activity(limit),
+                    lambda: get_recent_operations(get_db, 50))
+
+from core.api.activation import router as activation_router
+app.include_router(activation_router)
+from core.api.recovery_gate import RecoveryGate
+app.add_middleware(RecoveryGate, settings=lambda: _get_current_settings())
+
+
+def _require_no_pending_recovery():
+	from core.activation import read_pending_recovery
+	if read_pending_recovery(_get_current_settings().data_dir):
+		raise HTTPException(status_code=409, detail="An interrupted switch needs recovery before changing mods.")
+
+
+compatibility.configure_mutation_guard(_require_no_pending_recovery)
+
 logger = logging.getLogger("modmanager.api")
 
 
@@ -1180,7 +1201,13 @@ def _task_delete_outdated_versions() -> int:
 			pass
 
 
+@compatibility.serialized
 def _apply_settings_update(payload: SettingsUpdatePayload) -> Dict[str, Any]:
+	from core.activation import read_pending_recovery
+	current = _get_current_settings()
+	if payload.data_dir and payload.data_dir.strip() and read_pending_recovery(current.data_dir):
+		if os.path.normcase(str(Path(payload.data_dir.strip()).resolve())) != os.path.normcase(str(Path(current.data_dir).resolve())):
+			raise HTTPException(status_code=409, detail="Recover the interrupted switch before moving the data folder.")
 	overrides: Dict[str, Any] = {}
 	if payload.data_dir is not None:
 		value = payload.data_dir.strip()
@@ -1517,6 +1544,7 @@ def _task_bootstrap_rebuild() -> int:
 	return exit_code
 
 
+@compatibility.guarded_mutation
 def _run_settings_task(
 	task: SettingsTaskName,
 	*,
@@ -2050,6 +2078,7 @@ def _enumerate_pak_entries(root_dir: str) -> List[str]:
 	return entries
 
 
+@compatibility.guarded_mutation
 def _ingest_resolved_download(
 	path: Path,
 	*,
@@ -7099,6 +7128,7 @@ def delete_mod_image(image_id: int) -> Dict[str, Any]:
 
 
 @app.get("/api/downloads")
+@compatibility.serialized
 def list_downloads() -> List[Dict[str, Any]]:
 	"""List local downloads with joined mod info and tags sourced strictly from v_local_downloads_with_tags.
 
@@ -7328,7 +7358,8 @@ def list_downloads() -> List[Dict[str, Any]]:
 	nsfw_count = sum(1 for item in out if item.get("contains_adult_content"))
 	logger.info(f"[list_downloads] NSFW mods count: {nsfw_count} out of {len(out)} entries")
 
-	if db_updates:
+	from core.activation import read_pending_recovery
+	if db_updates and not read_pending_recovery(_get_current_settings().data_dir):
 		try:
 			from core.db.db import update_local_download_active_paks
 			for dl_id, filtered_paks in db_updates:
@@ -8308,6 +8339,7 @@ def _remove_in_mods_by_stems(mods_dir: Path, stems: List[str]) -> List[str]:
 
 
 @app.post("/api/local_downloads/delete")
+@compatibility.guarded_mutation
 def delete_local_downloads_endpoint(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 	"""Remove one or more local_downloads rows and cascade associated data."""
 	if not isinstance(payload, dict):
@@ -8414,7 +8446,7 @@ def delete_local_downloads_endpoint(payload: Dict[str, Any] = Body(...)) -> Dict
 
 
 @app.post("/api/mods/disable-all")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def disable_all_mods() -> Dict[str, Any]:
 	"""Disable all active mods and clear the ~mods folder."""
 	conn = get_db()
@@ -8557,7 +8589,7 @@ class BulkActivatePayload(BaseModel):
 
 
 @app.post("/api/local_downloads/bulk-activate")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def bulk_activate_downloads(payload: BulkActivatePayload) -> Dict[str, Any]:
 	"""Turn a set of mods on or off in one go.
 
@@ -8832,7 +8864,7 @@ def _rewrite_zip_without(archive: Path, drop: Set[str], dest: Path) -> int:
 
 
 @app.post("/api/local_downloads/{download_id}/delete-file")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def delete_download_file(
 	download_id: int, payload: RemoveDownloadFilePayload
 ) -> Dict[str, Any]:
@@ -8980,7 +9012,7 @@ def delete_download_file(
 
 
 @app.post("/api/local_downloads/{download_id}/restore-file")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def restore_download_file(
 	download_id: int, payload: RemoveDownloadFilePayload
 ) -> Dict[str, Any]:
@@ -9085,7 +9117,7 @@ def set_file_note(download_id: int, payload: ModFileNotePayload) -> Dict[str, An
 
 
 @app.post("/api/local_downloads/{download_id}/remove-file")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def remove_download_file(
 	download_id: int, payload: RemoveDownloadFilePayload
 ) -> Dict[str, Any]:
@@ -9201,7 +9233,7 @@ def get_compatibility() -> Dict[str, Any]:
 
 
 @app.post("/api/compatibility/repair")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def repair_compatibility() -> Dict[str, Any]:
 	root = _mods_folder_from_env()
 	backup_root = _get_current_settings().data_dir / "compatibility-backups"
@@ -9210,7 +9242,7 @@ def repair_compatibility() -> Dict[str, Any]:
 
 
 @app.post("/api/compatibility/restore/{backup_id}")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def restore_compatibility(backup_id: str) -> Dict[str, Any]:
 	try:
 		result = compatibility.restore(_mods_folder_from_env(),
@@ -9222,7 +9254,7 @@ def restore_compatibility(backup_id: str) -> Dict[str, Any]:
 
 
 @app.post("/api/local_downloads/{download_id}/set-active")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def set_active_paks(download_id: int, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 	"""Set the active pak list for a local_downloads row and mirror files into the game's ~mods folder.
 
@@ -9788,7 +9820,7 @@ def set_active_paks(download_id: int, payload: Dict[str, Any] = Body(...)) -> Di
 
 
 @app.post("/api/local_downloads/activate-by-name")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def activate_by_name(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 	"""Activate all pak files for the given local_download name by extracting its archive to ~mods.
 
@@ -9820,7 +9852,7 @@ def activate_by_name(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
 
 @app.post("/api/local_downloads/deactivate-by-name")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def deactivate_by_name(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 	"""Deactivate (remove) all pak files for the given local_download name from ~mods and DB.
 
@@ -9871,6 +9903,7 @@ def deactivate_by_name(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
 
 @app.post("/api/scan/active")
+@compatibility.guarded_mutation
 def scan_active_endpoint() -> Dict[str, Any]:
 	"""Trigger a filesystem scan of ~mods and update local_downloads.active_paks accordingly."""
 	# Validate configuration before scanning
@@ -10100,6 +10133,7 @@ def get_pak_assets(download_ids: Optional[str] = None) -> List[Dict[str, Any]]:
 
 
 @app.delete("/api/mods/{mod_id}")
+@compatibility.guarded_mutation
 def delete_mod_endpoint(mod_id: int) -> Dict[str, Any]:
 	"""Delete all local downloads for a specific mod and clean up associated metadata.
 	
@@ -10577,7 +10611,7 @@ def get_backup_retention() -> Dict[str, Any]:
 
 
 @app.post("/api/backup/retention")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def set_backup_retention(payload: BackupCreatePayload) -> Dict[str, Any]:
     from core.backup.service import BackupError, set_retention
     try:
@@ -10688,7 +10722,7 @@ def _installed_nexus_mod_ids() -> set:
 
 
 @app.post("/api/backup/delete")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def delete_backup_route(payload: BackupDeletePayload) -> Dict[str, Any]:
 	"""Delete one archive chosen by the user."""
 	from core.backup import BackupError as _BackupError
@@ -10701,7 +10735,7 @@ def delete_backup_route(payload: BackupDeletePayload) -> Dict[str, Any]:
 
 
 @app.post("/api/backup/prune")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def prune_backups_route(payload: BackupPrunePayload) -> Dict[str, Any]:
 	"""Delete all but the newest ``keep`` archives."""
 	from core.backup import BackupError as _BackupError
@@ -10821,7 +10855,7 @@ def _materialise_active_paks(
     return {"activated": applied, "deactivated": removed, "failed": failed, "errors": errors}
 
 
-@compatibility.serialized
+@compatibility.guarded_mutation
 def _refile_active_paks(*, dry_run: bool = False) -> Dict[str, Any]:
 	"""Move already-active paks into the character folder they now resolve to.
 
@@ -10981,7 +11015,7 @@ def _refile_active_paks(*, dry_run: bool = False) -> Dict[str, Any]:
 
 
 @app.post("/api/backup/restore")
-@compatibility.serialized
+@compatibility.guarded_mutation
 def restore_backup_route(payload: BackupRestorePayload) -> Dict[str, Any]:
 	"""Restore a backup archive over the live database, then apply it to ~mods."""
 	from core.backup import BackupError, restore_backup

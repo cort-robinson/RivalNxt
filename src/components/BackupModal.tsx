@@ -1,4 +1,7 @@
 import "../styles/backup.css";
+import { PresetPreviewDialog } from "./PresetPreviewDialog";
+import { useActivationReview } from "./useActivationReview";
+import { previewBackupActivation } from "../lib/backupActivation";
 import { useState, useEffect, useMemo } from "react";
 import {
   Dialog,
@@ -47,7 +50,6 @@ import {
   disableAllRemembering,
   findActivePreset,
   listPresets,
-  restoreLoadout,
   savePreset,
 } from "../lib/loadoutActions";
 import {
@@ -56,7 +58,7 @@ import {
   invokeOpenFileDialog,
   invokeReadTextFile,
 } from "../lib/tauri-utils";
-import { setActivePaks, scanActive, refreshConflicts, getLocalDownload, getModCustomTags, addModCustomTag, getModDetails, fetchModImages, updateModDetails, uploadModImagesBase64, createBackup, restoreBackup, listServerBackups, deleteBackup, listDownloads, getBackupRetention, setBackupRetention } from "../lib/api";
+import { scanActive, refreshConflicts, getModCustomTags, addModCustomTag, getModDetails, fetchModImages, updateModDetails, uploadModImagesBase64, createBackup, restoreBackup, listServerBackups, deleteBackup, listDownloads, getBackupRetention, setBackupRetention } from "../lib/api";
 
 interface BackupModalProps {
   open: boolean;
@@ -113,6 +115,8 @@ export function BackupModal({
   onBackupCreated,
   onBackupRestored,
 }: BackupModalProps) {
+  const [previewLoadout, setPreviewLoadout] = useState<Loadout | null>(null);
+  const { requestReview, dialog: backupFileReview } = useActivationReview();
   const [view, setView] = useState<ModalView>("home");
   const [isWorking, setIsWorking] = useState(false);
   const [creatingStep, setCreatingStep] = useState<"gathering" | "saving">("gathering");
@@ -375,6 +379,8 @@ export function BackupModal({
         description: "Restore Loadout brings them back.",
       });
     } catch (err: any) {
+      setSavedLoadout(getLoadout(AUTO_LOADOUT_ID));
+      onBackupRestored?.();
       toast.error(`Failed to disable mods: ${err?.message ?? String(err)}`, { id: toastId });
     } finally {
       setIsWorking(false);
@@ -405,27 +411,7 @@ export function BackupModal({
     }
   };
 
-  const handleApplyPreset = async (preset: Loadout) => {
-    const toastId = "apply-preset";
-    setIsWorking(true);
-    toast.loading(`Applying "${preset.name}"…`, { id: toastId });
-    try {
-      const { updated, missing } = await restoreLoadout(preset);
-      onBackupRestored?.();
-      if (updated === 0) {
-        toast.info(`Mods already match "${preset.name}"`, { id: toastId });
-        return;
-      }
-      toast.success(`Applied "${preset.name}" — ${updated} mod(s) updated`, {
-        id: toastId,
-        description: missing > 0 ? `${missing} mod(s) no longer installed.` : undefined,
-      });
-    } catch (err: any) {
-      toast.error(`Failed to apply preset: ${err?.message ?? String(err)}`, { id: toastId });
-    } finally {
-      setIsWorking(false);
-    }
-  };
+  const handleApplyPreset = (preset: Loadout) => setPreviewLoadout(preset);
 
   const handleDeletePreset = (preset: Loadout) => {
     deletePreset(preset.id);
@@ -433,28 +419,7 @@ export function BackupModal({
     toast.success(`Preset "${preset.name}" deleted`);
   };
 
-  const handleRestoreLoadout = async (target?: Loadout | null) => {
-    const toastId = "loadout-restore";
-    setIsWorking(true);
-    toast.loading("Restoring loadout…", { id: toastId });
-    try {
-      const { updated, missing } = await restoreLoadout(target ?? savedLoadout);
-      if (updated === 0) {
-        toast.info("Mods already match this loadout", { id: toastId });
-        return;
-      }
-
-      onBackupRestored?.();
-      toast.success(`Loadout restored — ${updated} mod(s) updated`, {
-        id: toastId,
-        description: missing > 0 ? `${missing} mod(s) from the loadout are no longer installed.` : undefined,
-      });
-    } catch (err: any) {
-      toast.error(`Failed to restore loadout: ${err?.message ?? String(err)}`, { id: toastId });
-    } finally {
-      setIsWorking(false);
-    }
-  };
+  const handleRestoreLoadout = (target?: Loadout | null) => setPreviewLoadout(target ?? savedLoadout);
 
   // ── Load backup for preview ───────────────────────────────────────────────
   const handleLoadBackup = async () => {
@@ -625,61 +590,8 @@ export function BackupModal({
     setView("restoring");
 
     try {
-      let changed = 0;
-
-      // Step 1 – Disable mods that were inactive in the backup (delta only — no nuclear sweep)
-      for (const mod of toDisable) {
-        const downloadIds = mod.sourceDownloadIds || [];
-        for (const dlId of downloadIds) {
-          await setActivePaks(Number(dlId), []);
-        }
-        changed++;
-      }
-
-      // Step 2 – Enable each mod in toEnable with its saved active variant paks
-      for (const mod of toEnable) {
-        // Find matching backup entry to get exact activePaks
-        const backupEntry = backup.mods.find(e => {
-          if (e.backendModId != null && mod.backendModId != null) {
-            return e.backendModId === mod.backendModId;
-          }
-          if (e.sourceDownloadIds.length > 0 && Array.isArray(mod.sourceDownloadIds)) {
-            return e.sourceDownloadIds.some(id => mod.sourceDownloadIds.includes(id));
-          }
-          return String(e.modId) === String(mod.id);
-        });
-
-        const backupDlIds = new Set<number>((backupEntry?.sourceDownloadIds || []).map(Number));
-        const backupActivePaks = backupEntry?.activePaks || [];
-        const backupActiveBases = new Set(backupActivePaks.map(p => {
-          const parts = p.split(/[\/\\]/);
-          return parts[parts.length - 1].toLowerCase();
-        }));
-
-        const currentDownloadIds = mod.sourceDownloadIds || [];
-        for (const dlId of currentDownloadIds) {
-          const numId = Number(dlId);
-          if (!backupDlIds.has(numId)) {
-            await setActivePaks(numId, []);
-            continue;
-          }
-
-          if (backupActiveBases.size > 0) {
-            const dl = await getLocalDownload(numId);
-            const paks = (dl.contents || []).filter((f: string) => f.toLowerCase().endsWith(".pak"));
-            const targetPaks = paks.filter((p: string) => {
-              const parts = p.split(/[\/\\]/);
-              return backupActiveBases.has(parts[parts.length - 1].toLowerCase());
-            });
-            await setActivePaks(numId, targetPaks);
-          } else {
-            const dl = await getLocalDownload(numId);
-            const paks = (dl.contents || []).filter((f: string) => f.toLowerCase().endsWith(".pak"));
-            await setActivePaks(numId, paks);
-          }
-        }
-        changed++;
-      }
+      const previewFiles = () => previewBackupActivation(backup, mods);
+      await requestReview(await previewFiles(), previewFiles);
 
       // Step 3 – Restore custom user data (tags, description, images)
       for (const mod of mods) {
@@ -789,6 +701,7 @@ export function BackupModal({
         : "linear-gradient(90deg, #8b5cf6, #6366f1)";
 
   return (
+    <>
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       {/* The card grew past the viewport once presets and the backup list were
           added, and `overflow: hidden` simply clipped it — the Presets section
@@ -1611,5 +1524,10 @@ export function BackupModal({
         </div>
       </DialogContent>
     </Dialog>
+    {backupFileReview}
+    <PresetPreviewDialog open={previewLoadout !== null} loadout={previewLoadout}
+      onOpenChange={(next) => { if (!next) setPreviewLoadout(null); }}
+      onApplied={() => { onBackupRestored?.(); setActivePresetId(previewLoadout?.id ?? null); toast.success("Selection applied"); }} />
+    </>
   );
 }

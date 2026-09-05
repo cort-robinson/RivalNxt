@@ -388,6 +388,8 @@ export interface Loadout {
   createdAt: string;
   /** downloadId (as a string key) -> exact active pak paths at capture time. */
   entries: Record<string, string[]>;
+  /** Identity guard for download IDs reused after a database restore. */
+  downloadPaths?: Record<string, string>;
   /** Number of downloads that had at least one active pak. */
   activeDownloads: number;
   /** Total active pak files across all downloads. */
@@ -397,6 +399,7 @@ export interface Loadout {
 /** Shape this needs from ApiDownload — kept structural so tests need no fixtures. */
 export interface LoadoutSourceDownload {
   id: number | string;
+  path?: string;
   active_paks?: string[] | null;
 }
 
@@ -413,12 +416,14 @@ export function buildLoadout(
   id?: string,
 ): Loadout {
   const entries: Record<string, string[]> = {};
+  const downloadPaths: Record<string, string> = {};
   let activePaks = 0;
 
   for (const dl of downloads) {
     const paks = Array.isArray(dl.active_paks) ? dl.active_paks.filter(Boolean) : [];
     if (paks.length === 0) continue;
     entries[String(dl.id)] = paks;
+    if (dl.path) downloadPaths[String(dl.id)] = dl.path;
     activePaks += paks.length;
   }
 
@@ -427,6 +432,7 @@ export function buildLoadout(
     name,
     createdAt: new Date().toISOString(),
     entries,
+    ...(Object.keys(downloadPaths).length ? { downloadPaths } : {}),
     activeDownloads: Object.keys(entries).length,
     activePaks,
   };

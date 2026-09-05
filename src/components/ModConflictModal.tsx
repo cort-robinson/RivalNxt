@@ -1,8 +1,11 @@
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Badge } from "./ui/badge";
 import { AlertTriangle } from "lucide-react";
 import { LazyModModal as ModModal } from "./LazyModModal";
 import { useState } from "react";
+import { Button } from "./ui/button";
+import { PresetPreviewDialog } from "./PresetPreviewDialog";
+import { previewKeepVariant, type ActivationPlan } from "../lib/activationApi";
 import type { Mod } from "./ModCard";
 
 interface MockMod {
@@ -50,11 +53,24 @@ export function ModConflictModal({
   mods: allMods = [],
 }: ModConflictModalProps) {
   const FALLBACK_ICON_URL =
-    "https://i.pinimg.com/1200x/44/da/5e/44da5e6d9dd75cb753ab5925aff4ce4c.jpg";
+    "/icons/mod-placeholder.svg";
 
   // State for ModModal
   const [selectedMod, setSelectedMod] = useState<Mod | null>(null);
   const [isModModalOpen, setIsModModalOpen] = useState(false);
+
+  const [resolution, setResolution] = useState<ActivationPlan | null>(null);
+  const [resolutionBusy, setResolutionBusy] = useState(false);
+  const [resolutionError, setResolutionError] = useState("");
+
+  async function keepVariant(mod: MockMod) {
+    if (mod.local_download_id == null) return;
+    setResolutionBusy(true);
+    setResolutionError("");
+    try { setResolution(await previewKeepVariant(mod.local_download_id, mod.pak_file)); }
+    catch (error) { setResolutionError(error instanceof Error ? error.message : "Could not preview this variant."); }
+    finally { setResolutionBusy(false); }
+  }
 
   // If conflicts are in mockConflicts format (asset_path exists), use directly.
   const isMockShape =
@@ -96,6 +112,12 @@ export function ModConflictModal({
     const db = b.detected_at ? new Date(b.detected_at).getTime() : 0;
     return db - da;
   });
+
+  const groupLabel = (asset: MockAssetConflict) => {
+    const tags = [...new Set(asset.participants.map((p) => p.merged_tag).filter(Boolean))];
+    return tags.length ? tags.join(" · ") : asset.category || "Other shared assets";
+  };
+  const groupedItems = [...items].sort((a, b) => groupLabel(a).localeCompare(groupLabel(b)));
 
   const handleModClick = (mod: MockMod) => {
     // Try to find the full mod data from the real mods array
@@ -146,7 +168,7 @@ export function ModConflictModal({
           className="w-full bg-card border border-border rounded-2xl shadow-2xl p-0"
           style={{
             maxWidth: "min(1280px, 95vw)",
-            minWidth: "1000px",
+            minWidth: "min(700px, 95vw)",
             width: "min(1280px, 95vw)",
             height: "90vh",
             maxHeight: "90vh",
@@ -165,12 +187,14 @@ export function ModConflictModal({
                   variant="destructive"
                   className="text-xs px-2 py-1 rounded-full font-semibold bg-destructive/90 text-destructive-foreground/90"
                 >
-                  {items.length} assets
+                  {items.length} {items.length === 1 ? "asset" : "assets"}
                 </Badge>
               </div>
             </div>
           </DialogHeader>
 
+          <DialogDescription className="px-6 text-sm text-muted-foreground">Grouped by detected character or skin tags. These mods replace shared game assets; keep a variant to review which overlapping files will be disabled.</DialogDescription>
+          {resolutionError ? <p role="alert" className="px-6 text-sm text-destructive">{resolutionError}</p> : null}
           <style>{`.custom-scrollbar::-webkit-scrollbar {
             width: 8px;
           }
@@ -192,15 +216,16 @@ export function ModConflictModal({
             {items.length === 0 ? (
               <div className="text-center text-muted-foreground py-12 text-base font-medium">
                 <p>
-                  No mod conflicts detected. Your installed mods are compatible!
+                  No overlapping assets detected in this list. In-game compatibility is still unverified.
                 </p>
               </div>
             ) : (
-              items.map((asset, idx) => (
+              groupedItems.map((asset, idx) => (
                 <div
                   key={idx}
                   className="bg-card border border-border rounded-xl shadow-sm hover:shadow-md transition-shadow duration-200"
                 >
+                  {(idx === 0 || groupLabel(groupedItems[idx - 1]) !== groupLabel(asset)) ? <h3 className="px-5 pt-4 font-semibold">{groupLabel(asset)}</h3> : null}
                   {/* Stylish header for asset path (icon removed for less redundancy) */}
                   <div className="flex items-center gap-1 px-5 pt-5 pb-3 pr-2 rounded-t-xl bg-gradient-to-r from-primary/10 to-accent/10 border-b border-border/60">
                     <span
@@ -342,6 +367,10 @@ export function ModConflictModal({
                                   ? `${displayName.slice(0, 25)}...`
                                   : displayName}
                               </div>
+                              {m.local_download_id != null ? <Button
+                                variant="outline" size="sm" disabled={resolutionBusy}
+                                onClick={(event) => { event.stopPropagation(); void keepVariant(m); }}
+                              >Keep this variant</Button> : <span className="text-xs text-muted-foreground">Open mod to identify its download</span>}
                             </div>
                           );
                         })}
@@ -353,6 +382,8 @@ export function ModConflictModal({
           </div>
         </DialogContent>
       </Dialog>
+      <PresetPreviewDialog open={resolution !== null} onOpenChange={(next) => { if (!next) setResolution(null); }}
+        initialPlan={resolution} title="Keep this variant" onApplied={() => { onConflictStateChanged?.(); onRefreshMods?.(); }} />
       {selectedMod && (
         <ModModal
           mod={selectedMod}

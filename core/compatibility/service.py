@@ -12,6 +12,7 @@ import tempfile
 import threading
 import uuid
 from functools import wraps
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,35 @@ from .pak import PakError, inspect
 
 # Shared by activation, deactivation, repair and restore routes in this process.
 mutation_lock = threading.RLock()
+_mutation_guard = None
+_recovery_operation = ContextVar("recovery_operation", default=False)
+
+
+def configure_mutation_guard(callback):
+    global _mutation_guard
+    _mutation_guard = callback
+
+
+def guarded_mutation(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with mutation_lock:
+            if _mutation_guard is not None and not _recovery_operation.get():
+                _mutation_guard()
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def recovery_operation(function):
+    """Only an explicitly invoked transaction may mutate its pending journal."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        token = _recovery_operation.set(True)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _recovery_operation.reset(token)
+    return wrapped
 
 
 def serialized(function):

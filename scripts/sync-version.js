@@ -9,9 +9,10 @@ console.log(`📦 Syncing version ${version} to all files...`);
 
 // 1. Update Tauri config
 const tauriConfigPath = path.join(__dirname, "../src-tauri/tauri.conf.json");
-const tauriConfig = JSON.parse(fs.readFileSync(tauriConfigPath, "utf8"));
-tauriConfig.version = version;
-fs.writeFileSync(tauriConfigPath, JSON.stringify(tauriConfig, null, 2) + "\n");
+const tauriConfig = fs.readFileSync(tauriConfigPath, "utf8").replace(
+  /("version"\s*:\s*)"[^"]+"/, `$1"${version}"`
+);
+fs.writeFileSync(tauriConfigPath, tauriConfig);
 console.log(`  ✅ tauri.conf.json`);
 
 // Python imports this constant for every Nexus request.

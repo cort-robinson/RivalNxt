@@ -69,6 +69,12 @@ const CrashDetectorModal = lazy(() =>
 const ActivityDialog = lazy(() =>
   import("./components/ActivityDialog").then((m) => ({ default: m.ActivityDialog })),
 );
+const AppUpdateDialog = lazy(() => import("./components/AppUpdateDialog").then((m) => ({ default: m.AppUpdateDialog })));
+const RecoveryNotice = lazy(() => import("./components/RecoveryNotice").then((m) => ({ default: m.RecoveryNotice })));
+const DiagnosticsDialog = lazy(() => import("./components/DiagnosticsDialog").then((m) => ({ default: m.DiagnosticsDialog })));
+const HealthReviewDialog = lazy(() => import("./components/HealthReviewDialog").then((m) => ({ default: m.HealthReviewDialog })));
+const PresetPreviewDialog = lazy(() => import("./components/PresetPreviewDialog").then((m) => ({ default: m.PresetPreviewDialog })));
+
 import { parseCrashContext, type CrashInfo } from "./lib/crashParser";
 import { toast } from "sonner";
 import { Toaster } from "./components/ui/sonner";
@@ -117,12 +123,10 @@ import {
   type ApiBootstrapStatus,
 } from "./lib/api";
 import {
-  disableAllRemembering,
   findActivePreset,
   getRememberedLoadout,
   listPresets,
-  restoreLoadout,
-} from "./lib/loadoutActions";
+} from "./lib/loadoutState";
 import type { Loadout } from "./lib/backupUtils";
 import { nextPollDelay } from "./lib/pollingHelpers";
 import { useHasBeenTrue } from "./lib/lazyMount";
@@ -279,6 +283,10 @@ export default function App() {
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const backupEverOpened = useHasBeenTrue(backupOpen);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [appUpdateOpen, setAppUpdateOpen] = useState(false);
+  const [healthReviewOpen, setHealthReviewOpen] = useState(false);
+  const [previewLoadout, setPreviewLoadout] = useState<Loadout | null>(null);
   const activityEverOpened = useHasBeenTrue(activityOpen);
   const [collectionsCount, setCollectionsCount] = useState(0);
   const [backupsRefreshTrigger, setBackupsRefreshTrigger] = useState(0);
@@ -1820,6 +1828,7 @@ export default function App() {
     const toastId = "disable-all-mods";
     toast.loading("Remembering current loadout…", { id: toastId });
     try {
+      const { disableAllRemembering } = await import("./lib/loadoutActions");
       const { loadout, disabled } = await disableAllRemembering();
       setRememberedLoadout(getRememberedLoadout());
 
@@ -1835,6 +1844,7 @@ export default function App() {
       });
       handleRefresh();
     } catch (err) {
+      setRememberedLoadout(getRememberedLoadout());
       toast.error(
         `Failed to disable all mods: ${err instanceof Error ? err.message : String(err)}`,
         { id: toastId },
@@ -1842,59 +1852,13 @@ export default function App() {
     }
   };
 
-  const handleApplyPreset = async (presetId: string) => {
-    const preset = presets.find((p) => p.id === presetId);
-    if (!preset) return;
-
-    const toastId = "apply-preset-header";
-    toast.loading(`Applying "${preset.name}"…`, { id: toastId });
-    try {
-      const { updated, missing } = await restoreLoadout(preset);
-      if (updated === 0) {
-        toast.info(`Mods already match "${preset.name}"`, { id: toastId });
-      } else {
-        toast.success(`Applied "${preset.name}" — ${updated} mod${updated === 1 ? "" : "s"} updated`, {
-          id: toastId,
-          description:
-            missing > 0
-              ? `${missing} mod${missing === 1 ? " is" : "s are"} no longer installed.`
-              : undefined,
-          duration: 7000,
-        });
-      }
-      handleRefresh();
-    } catch (err) {
-      toast.error(
-        `Failed to apply preset: ${err instanceof Error ? err.message : String(err)}`,
-        { id: toastId },
-      );
-    }
+  const handleApplyPreset = (presetId: string) => {
+    const preset = presets.find((item) => item.id === presetId);
+    if (preset) setPreviewLoadout(preset);
   };
 
-  const handleRestoreLoadout = async () => {
-    const toastId = "restore-loadout";
-    toast.loading("Restoring loadout…", { id: toastId });
-    try {
-      const { updated, missing } = await restoreLoadout(rememberedLoadout);
-      if (updated === 0) {
-        toast.info("Mods already match the remembered loadout", { id: toastId });
-      } else {
-        toast.success(`Restored ${updated} mod${updated === 1 ? "" : "s"}`, {
-          id: toastId,
-          description:
-            missing > 0
-              ? `${missing} mod${missing === 1 ? " is" : "s are"} no longer installed and could not be restored.`
-              : undefined,
-          duration: 7000,
-        });
-      }
-      handleRefresh();
-    } catch (err) {
-      toast.error(
-        `Failed to restore loadout: ${err instanceof Error ? err.message : String(err)}`,
-        { id: toastId },
-      );
-    }
+  const handleRestoreLoadout = () => {
+    if (rememberedLoadout) setPreviewLoadout(rememberedLoadout);
   };
 
   const handleModAdded = () =>
@@ -2571,6 +2535,8 @@ export default function App() {
                 onOpenBootstrap={handleOpenBootstrap}
                 onOpenBackup={() => setBackupOpen(true)}
                 onOpenActivity={() => setActivityOpen(true)}
+                onOpenHealth={() => setHealthReviewOpen(true)}
+                onOpenAppUpdate={() => setAppUpdateOpen(true)}
                 onDisableAllMods={handleDisableAllMods}
                 onRestoreLoadout={handleRestoreLoadout}
                 rememberedLoadout={rememberedLoadout}
@@ -2581,6 +2547,9 @@ export default function App() {
                 onViewLastCrash={() => setCrashDetectorOpen(true)}
               />
 
+              {backendReady && <Suspense fallback={null}>
+                <RecoveryNotice onRecovered={handleRefresh} onDiagnostics={() => setDiagnosticsOpen(true)} />
+              </Suspense>}
               {/* Tab Content */}
               <div className="flex-1 overflow-hidden">
                 <Suspense fallback={PAGE_FALLBACK}>
@@ -2694,6 +2663,7 @@ export default function App() {
             </Suspense>
           )}
           <GameUpdateModal
+            onReviewHealth={() => { setGameUpdateModalOpen(false); setHealthReviewOpen(true); }}
             open={gameUpdateModalOpen}
             phase={gameUpdatePhase}
             steps={gameUpdateSteps}
@@ -2734,9 +2704,30 @@ export default function App() {
             />
             </Suspense>
           )}
+          {appUpdateOpen && <Suspense fallback={null}>
+            <AppUpdateDialog open={appUpdateOpen} onOpenChange={setAppUpdateOpen}
+              onBackupCreated={() => setBackupsRefreshTrigger((value) => value + 1)} />
+          </Suspense>}
+          {diagnosticsOpen && <Suspense fallback={null}>
+            <DiagnosticsDialog open={diagnosticsOpen} onOpenChange={setDiagnosticsOpen} />
+          </Suspense>}
+          {healthReviewOpen && <Suspense fallback={null}>
+            <HealthReviewDialog open={healthReviewOpen} onOpenChange={setHealthReviewOpen}
+              onOpenSettings={() => { setHealthReviewOpen(false); handleOpenSettings(); }}
+              onOpenPackages={() => { setHealthReviewOpen(false); setActiveTab("active"); }}
+              onOpenBackups={() => { setHealthReviewOpen(false); setBackupOpen(true); }} />
+          </Suspense>}
+          {previewLoadout && <Suspense fallback={null}>
+            <PresetPreviewDialog open={!!previewLoadout} loadout={previewLoadout}
+              onOpenChange={(open: boolean) => { if (!open) setPreviewLoadout(null); }}
+              onApplied={() => { setPreviewLoadout(null); handleRefresh(); }} />
+          </Suspense>}
           {activityEverOpened && (
             <Suspense fallback={null}>
-              <ActivityDialog open={activityOpen} onOpenChange={setActivityOpen} />
+              <ActivityDialog open={activityOpen} onOpenChange={setActivityOpen}
+                onOpenDiagnostics={() => { setActivityOpen(false); setDiagnosticsOpen(true); }}
+                onOpenHealth={() => { setActivityOpen(false); setHealthReviewOpen(true); }}
+                onOpenDownloads={() => { setActivityOpen(false); setActiveTab("downloads"); }} />
             </Suspense>
           )}
           {assignModIdEverOpened && (

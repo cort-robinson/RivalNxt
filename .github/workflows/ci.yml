@@ -166,7 +166,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: --verbose
+          args: --verbose --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload build logs on failure
         if: failure()

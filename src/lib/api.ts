@@ -405,7 +405,7 @@ async function debugLog(message: string, data?: any, level: string = "INFO") {
   }
 }
 
-async function getJson<T>(path: string): Promise<T> {
+export async function getJson<T>(path: string): Promise<T> {
   const baseUrl = await getBaseUrl();
   const res = await fetch(`${baseUrl}${path}`, {
     headers: {
@@ -444,7 +444,7 @@ async function getJson<T>(path: string): Promise<T> {
   return data;
 }
 
-async function postJson<TReq, TRes>(path: string, body: TReq): Promise<TRes> {
+export async function postJson<TReq, TRes>(path: string, body: TReq): Promise<TRes> {
   const baseUrl = await getBaseUrl();
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",

@@ -1,307 +1,151 @@
 name: Release Build
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build (for example v0.10.0)
+        required: true
+        type: string
+      publish:
+        description: Publish after verification (otherwise leave a draft)
+        default: false
+        type: boolean
 
-env:
-  CARGO_TERM_COLOR: always
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
-    # Keep an installer uploaded before publication; do not replace verified assets.
-    if: ${{ !contains(join(github.event.release.assets.*.name, ','), '_x64-setup.exe') }}
     runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_REPO: ${{ github.repository }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag }}
           submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "npm"
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+          cache: npm
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+          cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             src-tauri
             src-tauri/src/rust-ue-tools
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller maturin
-          pip install -r requirements.txt
-      - name: Install Node dependencies
-        run: npm install
-
-      # Step 1: Build and Install PyO3 Module with Maturin
-      - name: Build PyO3 Module with Maturin
-        run: |
-          echo "Building PyO3 module with Maturin..."
-          cd src-tauri/src/rust-ue-tools
-          echo "Current directory: $(Get-Location)"
-          echo "Contents of current directory:"
-          Get-ChildItem -Force
-
-          # Check if required files exist
-          if (-not (Test-Path "Cargo.toml")) {
-            Write-Error "Cargo.toml not found in current directory!"
-            Write-Error "Available files:"
-            Get-ChildItem -Force
-            exit 1
-          }
-
-          if (-not (Test-Path "pyproject.toml")) {
-            Write-Error "pyproject.toml not found in current directory!"
-            exit 1
-          }
-
-          echo "Cargo.toml and pyproject.toml found. Checking workspace members..."
-          if (Test-Path "repak-rivals") {
-            echo "repak-rivals submodule found"
-            Get-ChildItem -Path "repak-rivals" -Force
-          } else {
-            Write-Error "repak-rivals submodule not found! Git submodules may not have been initialized properly."
-            exit 1
-          }
-
-          # Build using maturin without specifying manifest path (it will use pyproject.toml)
-          maturin build --release --features pyo3
-
-          echo "Finding built wheel..."
-          $wheel = Get-ChildItem -Path target/wheels -Filter *.whl | Select-Object -First 1
-
-          if (-not $wheel) {
-            Write-Error "No wheel file found in target/wheels!"
-            Write-Error "Available contents in target directory:"
-            if (Test-Path target) { ls target }
-            exit 1
-          }
-
-          # Store absolute path before changing directories
-          $wheelPath = $wheel.FullName
-          echo "Found wheel: $wheelPath"
-          echo "Installing wheel..."
-          pip install $wheelPath --force-reinstall
-
-          echo "Verifying installation..."
-          python -c "import rust_ue_tools; print('rust_ue_tools imported successfully!')"
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to import rust_ue_tools module!"
-            exit 1
-          }
-
-          echo "Extracting wheel for PyInstaller bundling..."
-          cd ../../../
-          if (Test-Path extracted_wheel) { Remove-Item -Recurse -Force extracted_wheel }
-          New-Item -ItemType Directory -Path extracted_wheel | Out-Null
-
-          # Extract wheel to get package data
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::ExtractToDirectory($wheelPath, "extracted_wheel")
-
-          # Manually copy Oodle DLL to the extracted package
-          # This is required because Maturin doesn't bundle it by default without pyproject.toml config
-          echo "Copying Oodle DLL..."
-          $dllPath = "src-tauri/src/rust-ue-tools/repak-rivals/oo2core_9_win64.dll"
-          if (-not (Test-Path $dllPath)) {
-            Write-Error "Oodle DLL not found at: $dllPath"
-            Write-Error "Searching for DLL files in repak-rivals directory:"
-            Get-ChildItem -Path "src-tauri/src/rust-ue-tools/repak-rivals" -Filter "*.dll"
-            exit 1
-          }
-          Copy-Item -Path $dllPath -Destination "extracted_wheel/rust_ue_tools/"
-
-          echo "Wheel extracted successfully to extracted_wheel/"
-          ls extracted_wheel
-          ls extracted_wheel/rust_ue_tools
+      - name: Validate release identity and signing configuration
         shell: pwsh
-
-      # Step 2: Build Python Backend with PyInstaller
-      - name: Build Python Backend
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          echo "Verifying directories that will be bundled..."
-          echo "Core directory exists: $(Test-Path core)"
-          echo "Scripts directory exists: $(Test-Path scripts)"
-          echo "Extracted wheel directory exists: $(Test-Path extracted_wheel/rust_ue_tools)"
-          if (Test-Path core) { echo "Core dir size: $((Get-ChildItem core -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB) MB" }
-          if (Test-Path scripts) { echo "Scripts dir size: $((Get-ChildItem scripts -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB) MB" }
-          
-          echo "Cleaning previous builds..."
-          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
-          if (Test-Path build) { Remove-Item -Recurse -Force build }
-
-          echo "Building backend executable using spec file..."
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$version") { throw 'Tag must match package version.' }
+          $tagCommit = git rev-parse "refs/tags/$($env:RELEASE_TAG)^{commit}"
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -ne (git rev-parse HEAD)) { throw 'Checkout must match an existing version tag.' }
+          if ($env:RELEASE_REPO -ne 'cort-robinson/RivalNxt') { throw 'Updater feed is scoped to cort-robinson/RivalNxt.' }
+          if (-not $env:SIGNING_KEY) { throw 'Configure TAURI_SIGNING_PRIVATE_KEY before releasing.' }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          $existing = gh release view $env:RELEASE_TAG --repo $env:RELEASE_REPO --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0 -and -not ($existing | ConvertFrom-Json).isDraft) { throw 'Published releases are immutable; use a new version.' }
+          $global:LASTEXITCODE = 0
+      - name: Install dependencies
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install -r requirements.txt -r requirements-dev.txt maturin pyinstaller
+      - name: Build native Python module
+        shell: pwsh
+        working-directory: src-tauri/src/rust-ue-tools
+        run: |
+          maturin build --release --features pyo3 --out wheelhouse
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = Get-ChildItem wheelhouse/*.whl | Select-Object -First 1
+          pip install $wheel.FullName --force-reinstall
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "import rust_ue_tools"
+      - name: Build pinned repair worker
+        run: cargo build --release --locked --manifest-path tools/pak-repair/Cargo.toml
+      - name: Verify source and versions
+        run: |
+          ruff check core scripts tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pytest tests/ -q --tb=short
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test scripts/verify-update.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+      - name: Build and inspect backend
+        run: |
           python -m PyInstaller --noconfirm --clean rivalnxt_backend_merged.spec
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/verify_bundle.py dist/rivalnxt_backend.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          if (-not (Test-Path dist\rivalnxt_backend.exe)) {
-            Write-Error "Backend executable not found!"
-            exit 1
-          }
-
-          $backendSize = (Get-Item dist\rivalnxt_backend.exe).Length / 1MB
-          echo "Backend size: $backendSize MB"
-          echo "Expected size: ~51 MB (based on local builds)"
-
-          # The local build produces ~51 MB executables.
-          # If CI build is significantly smaller, it may be missing dependencies or data files.
-          # Different binary structure can trigger antivirus false positives.
-          if ($backendSize -lt 30) {
-            Write-Warning "⚠️ Backend size is smaller than expected ($backendSize MB vs ~51 MB local)."
-            Write-Warning "This may indicate missing dependencies or data files."
-            Write-Warning "Different binary structure can trigger antivirus false positives."
-          } else {
-            echo "✅ Backend size looks good!"
-          }
-
-          echo "Backend built successfully!"
-        shell: pwsh
-
-      # Step 3: Copy Backend to Tauri Sidecars
-      - name: Copy Backend to Sidecars
-        run: |
-          if (-not (Test-Path src-tauri\sidecars)) {
-            New-Item -ItemType Directory -Path src-tauri\sidecars
-          }
-          Copy-Item -Path dist\rivalnxt_backend.exe `
-                    -Destination src-tauri\sidecars\rivalnxt_backend-x86_64-pc-windows-msvc.exe `
-                    -Force
-
-          if (-not (Test-Path src-tauri\sidecars\rivalnxt_backend-x86_64-pc-windows-msvc.exe)) {
-            Write-Error "Failed to copy backend executable!"
-            exit 1
-          }
-
-          $sidecarSize = (Get-Item src-tauri\sidecars\rivalnxt_backend-x86_64-pc-windows-msvc.exe).Length / 1MB
-          echo "Sidecar size: $sidecarSize MB"
-        shell: pwsh
-
-      # Step 4a: Wait for GitHub API to be available (guards against transient 503 errors)
-      - name: Verify GitHub Release API is reachable
-        shell: pwsh
+          New-Item -ItemType Directory -Force src-tauri/sidecars | Out-Null
+          Copy-Item dist/rivalnxt_backend.exe src-tauri/sidecars/rivalnxt_backend-x86_64-pc-windows-msvc.exe -Force
+      - name: Build signed installer
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build
+      - name: Fetch previous release for upgrade verification
+        shell: pwsh
         run: |
-          $maxAttempts = 5
-          $attempt = 0
-          do {
-            $attempt++
-            try {
-              $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; "User-Agent" = "RivalNxt-CI" }
-              $url = "https://api.github.com/repos/$env:REPO/releases/tags/$env:TAG_NAME"
-              $response = Invoke-RestMethod -Uri $url -Headers $headers -ErrorAction Stop
-              Write-Host "✅ Release API reachable (attempt $attempt)"
-              break
-            } catch {
-              $status = $_.Exception.Response.StatusCode.value__
-              if ($status -ge 500 -and $attempt -lt $maxAttempts) {
-                Write-Warning "⚠️ GitHub API returned $status (attempt $attempt/$maxAttempts). Retrying in 20s..."
-                Start-Sleep -Seconds 20
-              } elseif ($status -eq 404) {
-                Write-Host "ℹ️ Release not found yet (404) — tauri-action will create it. Continuing."
-                break
-              } else {
-                Write-Warning "⚠️ API check failed with status $status — continuing anyway."
-                break
-              }
-            }
-          } while ($attempt -lt $maxAttempts)
-
-      # Step 4b: Build Tauri Application and upload release assets
-      - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          New-Item -ItemType Directory -Force previous-release | Out-Null
+          gh release download --repo $env:RELEASE_REPO --pattern '*_x64-setup.exe' --dir previous-release
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify upgrade without the previous published installer.' }
+      - name: Verify installer and upgrade on isolated runner
+        shell: pwsh
+        run: |
+          $installer = "src-tauri/target/release/bundle/nsis/RivalNxt_$($env:RELEASE_VERSION)_x64-setup.exe"
+          $previous = (Get-ChildItem previous-release/*_x64-setup.exe | Select-Object -First 1).FullName
+          ./scripts/release-smoke.ps1 -Installer $installer -Version $env:RELEASE_VERSION -PreviousInstaller $previous
+      - name: Prepare signed update feed and checksums
+        shell: pwsh
+        run: |
+          $installer = "src-tauri/target/release/bundle/nsis/RivalNxt_$($env:RELEASE_VERSION)_x64-setup.exe"
+          node scripts/verify-update.mjs $installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/prepare-release-assets.py $installer $env:RELEASE_VERSION "docs/releases/$($env:RELEASE_TAG).md"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload verified assets to draft release
+        shell: pwsh
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:RELEASE_REPO *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --repo $env:RELEASE_REPO --verify-tag --draft --title "RivalNxt $env:RELEASE_TAG" --notes-file "docs/releases/$($env:RELEASE_TAG).md"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $bundle = 'src-tauri/target/release/bundle/nsis'
+          gh release upload $env:RELEASE_TAG --repo $env:RELEASE_REPO "$bundle/RivalNxt_$($env:RELEASE_VERSION)_x64-setup.exe" "$bundle/RivalNxt_$($env:RELEASE_VERSION)_x64-setup.exe.sig" "$bundle/RivalNxt_$($env:RELEASE_VERSION)_x64-setup.exe.sha256" "$bundle/latest.json" --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $env:RELEASE_TAG --repo $env:RELEASE_REPO --notes-file "docs/releases/$($env:RELEASE_TAG).md"
+      - name: Publish verified release
+        if: inputs.publish
+        run: gh release edit $env:RELEASE_TAG --repo $env:RELEASE_REPO --draft=false --latest
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "RivalNxt ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download this version."
-          releaseDraft: false
-          prerelease: false
-          args: --verbose
-
-      # Step 5: Compute SHA256 checksum + filename for installer
-      - name: Compute SHA256 checksum
-        id: sha
-        shell: pwsh
-        env:
-          REPO: ${{ github.repository }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          $installer = Get-ChildItem -Path "src-tauri/target" -Recurse -Filter "RivalNxt*_x64-setup.exe" | Select-Object -First 1
-          if (-not $installer) { Write-Error "Installer exe not found in src-tauri/target"; exit 1 }
-
-          $installerHash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLower()
-          $installerName = $installer.Name
-
-          # Write checksum file e.g. "RivalNxt_0.2.2_x64-setup.exe.sha256"
-          $checksumFile = "$installerName.sha256"
-          "$installerHash  $installerName" | Out-File -FilePath $checksumFile -Encoding ascii
-
-          # Outputs for later steps
-          "INSTALLER_FILENAME=$installerName"       >> $env:GITHUB_OUTPUT
-          "SETUP_SHA256=$installerHash"            >> $env:GITHUB_OUTPUT
-          $baseUrl = "https://github.com/$env:REPO/releases/download/$env:TAG_NAME"
-          "INSTALLER_URL=$baseUrl/$installerName"  >> $env:GITHUB_OUTPUT
-          "CHECKSUM_URL=$baseUrl/$checksumFile"    >> $env:GITHUB_OUTPUT
-
-          # Upload checksum file as extra release asset
-          gh release upload "$env:TAG_NAME" "$checksumFile" --clobber
-
-           # Step 6: Generate release notes from template
-      - name: Generate release notes
-        shell: pwsh
-        run: |
-          (Get-Content .github/workflows/release_template.md) `
-            -replace '<INSTALLER_FILENAME>', '${{ steps.sha.outputs.INSTALLER_FILENAME }}' `
-            -replace '<INSTALLER_URL>',      '${{ steps.sha.outputs.INSTALLER_URL }}' `
-            -replace '<CHECKSUM_URL>',       '${{ steps.sha.outputs.CHECKSUM_URL }}' `
-          | Set-Content release_generated.md
-
-      # Step 7: Update GitHub Release body with generated notes
-      - name: Update GitHub Release body
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        shell: pwsh
-        run: |
-          gh release edit "$env:TAG_NAME" --notes-file release_generated.md
-
-      # Diagnostics
-      - name: Upload Backend Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rivalnxt-backend
-          path: dist/rivalnxt_backend.exe
-          retention-days: 7
-
-      - name: Upload Build Logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
+          name: release-evidence
           path: |
-            build/
-            src-tauri/target/
-          retention-days: 3
+            release-smoke-result.json
+            src-tauri/target/release/bundle/nsis/*.sha256
+            src-tauri/target/release/bundle/nsis/latest.json
+            build/*.txt
+          if-no-files-found: ignore

@@ -37,6 +37,7 @@ interface GameUpdateModalProps {
   newCharacters?: string[];
   newSkins?: string[];
   onDismiss: () => void;
+  onReviewHealth?: () => void;
 }
 
 export function GameUpdateModal({
@@ -47,6 +48,7 @@ export function GameUpdateModal({
   newCharacters = [],
   newSkins = [],
   onDismiss,
+  onReviewHealth,
 }: GameUpdateModalProps) {
   const allDone =
     phase === "done" ||
@@ -381,6 +383,9 @@ export function GameUpdateModal({
               paddingTop: "4px",
             }}
           >
+            {onReviewHealth && <Button variant="outline" onClick={() => { onDismiss(); onReviewHealth(); }}>
+              Review mod health
+            </Button>}
             <Button
               onClick={onDismiss}
               className="min-w-[100px]"

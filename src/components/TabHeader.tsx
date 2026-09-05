@@ -26,6 +26,8 @@ interface TabHeaderProps {
   onOpenBootstrap?: () => void;
   onOpenBackup?: () => void;
   onOpenActivity?: () => void;
+  onOpenHealth?: () => void;
+  onOpenAppUpdate?: () => void;
   onDisableAllMods?: () => void;
   /** Re-applies the loadout remembered by the last Disable All. */
   onRestoreLoadout?: () => void;
@@ -54,6 +56,8 @@ export function TabHeader({
   onOpenBootstrap,
   onOpenBackup,
   onOpenActivity,
+  onOpenHealth,
+  onOpenAppUpdate,
   onDisableAllMods,
   onRestoreLoadout,
   rememberedLoadout = null,
@@ -168,10 +172,11 @@ export function TabHeader({
                 size="sm"
                 onClick={onOpenActivity}
                 className="header-action-btn"
-                title="History — what this app changed"
+                title="Activity"
+                aria-label="Activity"
               >
                 <History className="w-4 h-4 shrink-0" />
-                <span className="header-action-text">History</span>
+                <span className="header-action-text">Activity</span>
               </Button>
             )}
             <Button
@@ -314,7 +319,7 @@ export function TabHeader({
                               onClick={() => onApplyPreset(preset.id)}
                               className="h-8 px-3 text-xs shrink-0"
                             >
-                              Apply
+                              Preview changes
                             </AlertDialogAction>
                           )}
                         </div>
@@ -330,42 +335,16 @@ export function TabHeader({
             )}
 
             {onRestoreLoadout && rememberedLoadout && (
-              <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="header-action-btn"
-                    style={{ borderColor: "rgba(56,189,248,0.5)", color: "#38bdf8" }}
-                    title={`${rememberedLoadout.activeDownloads} mods remembered`}
-                  >
-                    <RotateCcw className="w-4 h-4 shrink-0" />
-                    <span className="header-action-text">Restore Loadout</span>
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Restore Loadout</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      Re-enables the {rememberedLoadout.activeDownloads} mod
-                      {rememberedLoadout.activeDownloads === 1 ? "" : "s"} (
-                      {rememberedLoadout.activePaks} pak file
-                      {rememberedLoadout.activePaks === 1 ? "" : "s"}) that were
-                      active before the last Disable All, saved{" "}
-                      {new Date(rememberedLoadout.createdAt).toLocaleString()}.
-                      Anything enabled since then that is not in the loadout will
-                      be switched off.
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                    <AlertDialogAction onClick={onRestoreLoadout}>
-                      Restore
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
+              <Button variant="outline" size="sm" onClick={onRestoreLoadout}>
+                <RotateCcw className="w-4 h-4 shrink-0" />Restore Loadout
+              </Button>
             )}
+            {onOpenAppUpdate && <Button variant="outline" size="sm" onClick={onOpenAppUpdate}>
+              <RefreshCw className="w-4 h-4 shrink-0" />App updates
+            </Button>}
+            {onOpenHealth && <Button variant="outline" size="sm" onClick={onOpenHealth}>
+              <ShieldAlert className="w-4 h-4 shrink-0" />Health check
+            </Button>}
             <Button
               variant="outline"
               size="sm"

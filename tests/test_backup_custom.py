@@ -1,19 +1,36 @@
 import pytest
 import base64
 from fastapi.testclient import TestClient
-from core.api.server import app
-from core.api.dependencies import get_db
+from dataclasses import replace
 
-@pytest.fixture(scope="module")
-def client():
-    with TestClient(app) as c:
-        yield c
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    # This file also runs outside tests/backend, whose conftest otherwise sets
+    # the data directory. Set the override before importing any app modules.
+    monkeypatch.setenv("MOD_MANAGER_DATA_DIR", str(tmp_path))
+    (tmp_path / "settings.json").write_text("{}", encoding="utf-8")
+    from core.config import settings
+    from core.api import dependencies, server
+
+    isolated = replace(settings.SETTINGS, data_dir=tmp_path,
+                       marvel_rivals_root=None, marvel_rivals_local_downloads_root=None,
+                       nexus_api_key="")
+    monkeypatch.setattr(settings, "SETTINGS", isolated)
+    monkeypatch.setattr(server, "SETTINGS", isolated)
+    dependencies.reset_schema_cache()
+    try:
+        with TestClient(server.app) as c:
+            yield c
+    finally:
+        dependencies.reset_schema_cache()
 
 def test_custom_data_backup_restore_endpoints(client):
     """
     Test the backend APIs used by BackupModal.tsx and BackupRestoreModal.tsx
     to ensure description, custom images, and tags are correctly persisted.
     """
+    from core.api.dependencies import get_db
+
     # 1. Setup synthetic mod_id for local download placeholder
     # First we need a local download to exist so the API can generate a placeholder mod
     # For testing, we'll manually insert a dummy local_download directly into the db
@@ -50,7 +67,7 @@ def test_custom_data_backup_restore_endpoints(client):
     assert response.status_code in (200, 201)
 
     # 5. Verify the data is saved correctly (Simulating backup snapshot creation)
-    
+
     # Verify description
     response = client.get(f"/api/mods/{mod_id}")
     assert response.status_code == 200

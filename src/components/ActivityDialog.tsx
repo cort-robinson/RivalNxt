@@ -1,162 +1,88 @@
 import { useEffect, useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
-import { Loader2, Trash2 } from "lucide-react";
-import { toast } from "sonner";
+import { clearActivity, listActivity, listNxmHandoffs, cancelNxmHandoff, type ActivityEntry, type ApiNxmHandoffSummary } from "../lib/api";
+import { clearOperations, listOperations, type Operation } from "../lib/activityApi";
+import { openInBrowser } from "../lib/tauri-utils";
 
-import { clearActivity, listActivity, type ActivityEntry } from "../lib/api";
+type Props = { open: boolean; onOpenChange: (open: boolean) => void; onOpenDownloads?: () => void; onOpenDiagnostics?: () => void; onOpenHealth?: () => void };
+const label = (value?: string) => (value || "queued").replace(/_/g, " ");
 
-/** Colour per kind, so the list can be skimmed rather than read. */
-const KIND_STYLE: Record<string, { label: string; color: string }> = {
-  activated: { label: "on", color: "#22c55e" },
-  deactivated: { label: "off", color: "#94a3b8" },
-  changed: { label: "changed", color: "#38bdf8" },
-  file_hidden: { label: "hidden", color: "#f59e0b" },
-  file_restored: { label: "restored", color: "#a855f7" },
-  backup: { label: "backup", color: "#8b5cf6" },
-  restored: { label: "restore", color: "#f97316" },
-  deleted: { label: "deleted", color: "#ef4444" },
-  tagged: { label: "tagged", color: "#14b8a6" },
-};
-
-function when(iso: string): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return "";
-  const minutes = Math.round((Date.now() - at.getTime()) / 60000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  if (minutes < 60 * 24) return `${Math.round(minutes / 60)} h ago`;
-  return at.toLocaleDateString();
-}
-
-/**
- * What the app has done recently.
- *
- * Every one of these actions already reported itself in a toast that was gone
- * four seconds later. "Did that apply?" previously meant reading backend.log,
- * which is a developer artifact.
- */
-export function ActivityDialog({
-  open,
-  onOpenChange,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
+export function ActivityDialog({ open, onOpenChange, onOpenDownloads, onOpenDiagnostics, onOpenHealth }: Props) {
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-
+  const [operations, setOperations] = useState<Operation[]>([]);
+  const [handoffs, setHandoffs] = useState<ApiNxmHandoffSummary[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [attentionOnly, setAttentionOnly] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const [cancelling, setCancelling] = useState<string[]>([]);
   useEffect(() => {
     if (!open) return;
-    let cancelled = false;
-    setLoading(true);
-    void (async () => {
-      try {
-        const rows = await listActivity(200);
-        if (!cancelled) setEntries(rows);
-      } catch {
-        if (!cancelled) setEntries([]);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
-
-  const handleClear = async () => {
-    try {
-      await clearActivity();
-      setEntries([]);
-      toast.success("History cleared");
-    } catch (err) {
-      toast.error(
-        `Could not clear: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function load() {
+      const results = await Promise.allSettled([listActivity(200), listOperations(), listNxmHandoffs()]);
+      if (stopped) return;
+      if (results[0].status === "fulfilled") setEntries(results[0].value);
+      if (results[1].status === "fulfilled") setOperations(results[1].value);
+      if (results[2].status === "fulfilled") setHandoffs(results[2].value);
+      setError(results.some(result => result.status === "rejected") ? "Some activity could not refresh. Showing the last available results." : "");
+      setLoading(false);
+      timer = setTimeout(() => void load(), 3000);
     }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl" style={{ maxHeight: "80vh" }}>
-        <DialogHeader>
-          <DialogTitle>History</DialogTitle>
-          <DialogDescription>
-            What this app changed, newest first. The last 500 actions are kept.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div style={{ maxHeight: "55vh", overflowY: "auto" }} className="pr-1">
-          {loading ? (
-            <div className="flex items-center justify-center py-10 text-muted-foreground">
-              <Loader2 className="h-5 w-5 animate-spin" />
-            </div>
-          ) : entries.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-8 text-center">
-              Nothing yet. Turn a mod on and it will show up here.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-1.5">
-              {entries.map((entry) => {
-                const style = KIND_STYLE[entry.kind] ?? {
-                  label: entry.kind,
-                  color: "#94a3b8",
-                };
-                return (
-                  <div
-                    key={entry.id}
-                    className="flex items-start gap-3 rounded-lg px-2.5 py-2 bg-muted/30"
-                  >
-                    <span
-                      className="text-xs px-1.5 py-0.5 rounded shrink-0 mt-0.5 font-medium"
-                      style={{
-                        background: `${style.color}22`,
-                        color: style.color,
-                        minWidth: "62px",
-                        textAlign: "center",
-                      }}
-                    >
-                      {style.label}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm truncate">{entry.summary}</p>
-                      {entry.detail ? (
-                        <p className="text-xs text-muted-foreground truncate">
-                          {entry.detail}
-                        </p>
-                      ) : null}
-                    </div>
-                    <span className="text-xs text-muted-foreground/70 shrink-0 mt-0.5">
-                      {when(entry.at)}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {entries.length > 0 ? (
-          <div className="flex justify-end pt-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => void handleClear()}
-              className="gap-1.5 text-muted-foreground hover:text-destructive"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Clear history
-            </Button>
-          </div>
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  );
+    void load();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [open, refresh]);
+  async function cancel(id: string) {
+    setCancelling(current => [...current, id]);
+    try { await cancelNxmHandoff(id); setRefresh(value => value + 1); }
+    catch { setError("Cancellation could not be requested. Refresh activity and try again."); }
+    finally { setCancelling(current => current.filter(value => value !== id)); }
+  }
+  async function retryOnNexus(modId: number) {
+    try { await openInBrowser(`https://www.nexusmods.com/marvelrivals/mods/${modId}?tab=files`); }
+    catch { setError("Could not open Nexus Mods. Open the mod's Files page in your browser and choose Mod manager download."); }
+  }
+  async function clearHistory() {
+    try { await clearOperations(); await clearActivity(); setRefresh(value => value + 1); }
+    catch { setError("History could not be fully cleared. Refresh activity and try again."); }
+  }
+  const visible = operations.filter(item => !attentionOnly || ["failed", "interrupted"].includes(item.status));
+  const active = handoffs.filter(item => !["complete", "completed", "cancelled"].includes(item.progress?.stage || "") && (!attentionOnly || item.progress?.stage === "failed"));
+  const navigate = (action: () => void) => { onOpenChange(false); action(); };
+  return <Dialog open={open} onOpenChange={onOpenChange}>
+    <DialogContent className="max-w-2xl" style={{ width: "min(680px, calc(100vw - 32px))", maxWidth: "none", maxHeight: "85vh", overflowY: "auto" }}>
+      <DialogHeader><DialogTitle>Activity</DialogTitle><DialogDescription>Downloads, file changes, backups, and failures. Recent operations remain available after restarting.</DialogDescription></DialogHeader>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant={!attentionOnly ? "secondary" : "ghost"} aria-pressed={!attentionOnly} onClick={() => setAttentionOnly(false)}>All activity</Button>
+        <Button size="sm" variant={attentionOnly ? "secondary" : "ghost"} aria-pressed={attentionOnly} onClick={() => setAttentionOnly(true)}>Needs attention</Button>
+        <Button size="sm" variant="ghost" onClick={() => setRefresh(value => value + 1)}>Refresh activity</Button>
+      </div>
+      {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+      {loading ? <p role="status" className="text-sm">Loading activity…</p> : <>
+        {active.length > 0 && <section aria-label="Downloads"><h3 className="font-semibold mb-2">Downloads</h3>
+          <ul className="divide-y divide-border">{active.map(item => <li key={item.id} className="py-3 flex items-start gap-3">
+            <div className="min-w-0 flex-1"><p className="text-sm font-medium break-words">{String(item.metadata?.mod_info?.name || `Nexus mod ${item.request?.mod_id || "download"}`)}</p>
+              <p className="text-sm text-muted-foreground">{label(item.progress?.stage)}{typeof item.progress?.percent === "number" ? ` · ${Math.round(item.progress.percent)}%` : ""}</p>
+              {item.progress?.error && <p className="text-sm text-destructive break-words">{item.progress.error}</p>}</div>
+            {["downloading", "resolving", "queued", "pending", "preparing", "retrying"].includes(item.progress?.stage || "queued") && <Button size="sm" variant="outline" disabled={cancelling.includes(item.id)} onClick={() => void cancel(item.id)}>{cancelling.includes(item.id) ? "Requesting…" : "Cancel download"}</Button>}
+            {item.progress?.stage === "failed" && Number.isSafeInteger(item.request?.mod_id) && (item.request?.mod_id || 0) > 0 && <Button size="sm" variant="outline" onClick={() => void retryOnNexus(item.request!.mod_id!)}>Open Nexus to retry</Button>}
+          </li>)}</ul>
+          {active.some(item => item.progress?.stage === "failed") && <p className="text-sm text-muted-foreground">For failed downloads, open the mod's Files page and choose Mod manager download for a fresh link.</p>}
+          {onOpenDownloads && <Button size="sm" variant="outline" onClick={() => navigate(onOpenDownloads)}>Open downloads</Button>}
+        </section>}
+        <section aria-label="Operations"><h3 className="font-semibold mb-2">Operations</h3>
+          {visible.length === 0 ? <p className="text-sm text-muted-foreground py-3">{attentionOnly ? "No failed or interrupted operations recorded." : "Your next import, activation, or backup will appear here."}</p> : <ul className="divide-y divide-border">{visible.map(item => <li key={item.id} className="py-3">
+            <div className="flex flex-wrap justify-between gap-2"><p className="text-sm font-medium">{item.summary}</p><span className={`text-sm ${["failed", "interrupted"].includes(item.status) ? "text-destructive" : "text-muted-foreground"}`}>{label(item.status)}</span></div>
+            {item.detail && <p className="text-sm text-muted-foreground">{item.detail}</p>}
+            {item.status === "interrupted" && <p className="text-sm text-muted-foreground">The app closed before a result was recorded. Review your mods before repeating this action.</p>}
+            <time dateTime={item.at} className="text-xs text-muted-foreground">{new Date(item.at).toLocaleString()}</time>
+          </li>)}</ul>}
+        </section>
+        {!attentionOnly && entries.length > 0 && <details><summary className="text-sm cursor-pointer font-medium">Detailed change history ({entries.length})</summary><ul className="divide-y divide-border">{entries.map(item => <li key={item.id} className="py-2"><p className="text-sm break-words">{item.summary}</p>{item.detail && <p className="text-xs text-muted-foreground break-words">{item.detail}</p>}<time className="text-xs text-muted-foreground" dateTime={item.at}>{new Date(item.at).toLocaleString()}</time></li>)}</ul></details>}
+      </>}
+      <div className="flex flex-wrap gap-2">{onOpenHealth && <Button size="sm" variant="outline" onClick={() => navigate(onOpenHealth)}>Review mod health</Button>}{onOpenDiagnostics && <Button size="sm" variant="outline" onClick={() => navigate(onOpenDiagnostics)}>Export diagnostics</Button>}{(entries.length > 0 || operations.some(item => item.status !== "running")) && <Button size="sm" variant="ghost" onClick={() => void clearHistory()}>Clear finished history</Button>}</div>
+    </DialogContent>
+  </Dialog>;
 }
