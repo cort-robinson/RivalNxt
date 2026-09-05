@@ -6,15 +6,15 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.extraction.marvel_rivals_ids import (
-    extract_skin_ids_from_pak,
-    extract_character_names_from_locres,
-    extract_skin_names_from_locres
-)
-from core.config.settings import SETTINGS
-
 def main():
     """Run the manual extraction diagnostic against a configured game."""
+    from core.extraction.marvel_rivals_ids import (
+        extract_skin_ids_from_pak,
+        extract_character_names_from_locres,
+        extract_skin_names_from_locres
+    )
+    from core.config.settings import SETTINGS
+
     if not SETTINGS.marvel_rivals_root:
         raise SystemExit("Configure the Marvel Rivals game folder before running this diagnostic.")
 
