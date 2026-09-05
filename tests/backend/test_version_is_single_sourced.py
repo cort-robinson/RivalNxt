@@ -87,3 +87,13 @@ def test_no_hardcoded_user_agent_literals():
     assert "Project_ModManager_Rivals/" not in text, (
         "server.py builds a User-Agent by hand; use USER_AGENT from core.version"
     )
+
+
+def test_rust_package_and_lockfile_match_release_version():
+    import tomllib
+
+    manifest = tomllib.loads((ROOT / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((ROOT / "src-tauri/Cargo.lock").read_text(encoding="utf-8"))
+    package = next(item for item in lock["package"] if item["name"] == "rivalnxt")
+    assert manifest["package"]["version"] == _package_version()
+    assert package["version"] == _package_version()

@@ -22,3 +22,17 @@ const pythonVersion = fs.readFileSync(pythonVersionPath, "utf8").replace(
 );
 fs.writeFileSync(pythonVersionPath, pythonVersion);
 console.log(`Version ${version} synced to Tauri and Python.`);
+
+// Windows executable metadata comes from the Rust package version.
+const cargoPath = path.join(__dirname, "../src-tauri/Cargo.toml");
+const cargo = fs.readFileSync(cargoPath, "utf8").replace(
+  /^(version\s*=\s*)"[^"]+"/m,
+  `$1"${version}"`
+);
+fs.writeFileSync(cargoPath, cargo);
+const lockPath = path.join(__dirname, "../src-tauri/Cargo.lock");
+const lock = fs.readFileSync(lockPath, "utf8").replace(
+  /(name = "rivalnxt"\r?\nversion = )"[^"]+"/,
+  `$1"${version}"`
+);
+fs.writeFileSync(lockPath, lock);
