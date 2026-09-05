@@ -36,7 +36,7 @@ print("="*80)
 sorted_char_ids = sorted(character_skins.keys())
 
 for char_id in sorted_char_ids:
-    char_name = char_names.get(char_id, f"Unknown Character")
+    char_name = char_names.get(char_id, "Unknown Character")
     
     print(f"\n{'='*80}")
     print(f"Character ID: {char_id} - {char_name.upper()}")

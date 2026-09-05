@@ -138,6 +138,9 @@ jobs:
           pip install $wheel.FullName --force-reinstall
           python -c "import rust_ue_tools; print('rust_ue_tools OK')"
 
+      - name: Build pinned PAK repair worker
+        run: cargo build --release --locked --manifest-path tools/pak-repair/Cargo.toml
+
       # With the real extension installed, re-run the backend suite so any
       # test marked `requires_pyo3` actually executes.
       - name: Test against real PyO3 extension

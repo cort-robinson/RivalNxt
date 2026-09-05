@@ -96,4 +96,4 @@ print(f"\n🎉 Grand Total: {total_skins} new skins from patches!")
 
 # Check if 1029303 is there
 if '1029' in all_skins and '303' in all_skins['1029']:
-    print(f"\n✅ Confirmed: Skin 1029303 (Magik variant 303) is present!")
+    print("\n✅ Confirmed: Skin 1029303 (Magik variant 303) is present!")

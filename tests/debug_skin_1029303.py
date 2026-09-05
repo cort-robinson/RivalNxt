@@ -32,10 +32,10 @@ def check_skin_in_database():
             skin_303 = next((s for s in char_1029['skins'] if s['variant'] == '303'), None)
             
             if skin_303:
-                print(f"\n✅ Skin 1029303 EXISTS in database!")
+                print("\n✅ Skin 1029303 EXISTS in database!")
                 print(f"  Name: {skin_303['name']}")
             else:
-                print(f"\n❌ Skin 1029303 NOT FOUND in database")
+                print("\n❌ Skin 1029303 NOT FOUND in database")
                 print(f"\n  Available variants for {char_1029['name']}:")
                 for skin in sorted(char_1029['skins'], key=lambda s: s['variant']):
                     print(f"    {target_char}{skin['variant']} -> {skin['name']}")
@@ -78,9 +78,9 @@ def check_skin_in_extraction():
     print(f"  Total skin IDs found: {len(skin_ids)}")
     
     if '1029303' in skin_ids:
-        print(f"  ✅ Skin ID 1029303 found in PAK extraction")
+        print("  ✅ Skin ID 1029303 found in PAK extraction")
     else:
-        print(f"  ❌ Skin ID 1029303 NOT found in PAK extraction")
+        print("  ❌ Skin ID 1029303 NOT found in PAK extraction")
         # Check what 1029xxx skins exist
         skin_1029 = [sid for sid in skin_ids if sid.startswith('1029')]
         print(f"\n  Found {len(skin_1029)} skins for character 1029:")
@@ -94,7 +94,7 @@ def check_skin_in_extraction():
     if '1029303' in skin_names:
         print(f"  ✅ Skin 1029303 has name: '{skin_names['1029303']}'")
     else:
-        print(f"  ⚠ Skin 1029303 has no name in locres (will use fallback)")
+        print("  ⚠ Skin 1029303 has no name in locres (will use fallback)")
     
     print("\n[4/4] Combining data...")
     combined = combine_extraction_data(char_names, skin_ids, skin_names)
@@ -109,11 +109,11 @@ def check_skin_in_extraction():
         skin_303 = next((s for s in char_1029_data['skins'] if s['variant'] == '303'), None)
         
         if skin_303:
-            print(f"\n✅ Skin 303 found in extraction!")
+            print("\n✅ Skin 303 found in extraction!")
             print(f"  Name: {skin_303['name']}")
         else:
-            print(f"\n❌ Skin 303 NOT in final extraction data")
-            print(f"\n  Available variants:")
+            print("\n❌ Skin 303 NOT in final extraction data")
+            print("\n  Available variants:")
             for skin in sorted(char_1029_data['skins'], key=lambda s: s['variant']):
                 print(f"    {skin['variant']} -> {skin['name']}")
 
