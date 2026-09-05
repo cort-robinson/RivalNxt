@@ -1,0 +1,26 @@
+.compatibility-panel {
+  flex-shrink: 0;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.compatibility-panel summary:focus-visible,
+.compatibility-results:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+
+.compatibility-intro {
+  max-width: 72ch;
+}
+
+.compatibility-results {
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.compatibility-backups {
+  max-height: 12rem;
+  overflow-y: auto;
+}

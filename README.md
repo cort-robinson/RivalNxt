@@ -28,6 +28,7 @@ _One desktop app to manage, activate, and validate Marvel Rivals mods with confl
 - **Conflict Detection** - Automatic detection and resolution of mod conflicts with tag rebuilding
 - **Game Update Auto-Detection** - Automatically detects game updates on startup to dynamically rebuild character and skin data
 - **Automated Mod Recovery** - Uses MD5 hashing and background daemons to automatically recover and link broken or misnamed mod files
+- **Patch Index Repair** - Checks new installs and repairs old repak index entries with verified backups. Installed mods have scan and restore controls. In-game compatibility remains unknown. See [repair details](PATCH_COMPATIBILITY.md).
 - **Crash Detection** - Persistent crash log parsing utility to quickly identify faulty mods causing game crashes
 - **Backup & Restore** - Comprehensive backup system allowing safe save and recovery of mod configurations
 - **Custom Tagging** - Intelligent tag engine with custom tag support, advanced filtering, and search indexing

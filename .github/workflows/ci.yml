@@ -35,6 +35,11 @@ jobs:
           grep -viE '^(pyinstaller|pylocres)' requirements.txt > requirements-ci.txt
           pip install -r requirements-ci.txt -r requirements-dev.txt
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build pinned PAK repair worker
+        run: cargo build --release --locked --manifest-path tools/pak-repair/Cargo.toml
+
       - name: Lint (ruff)
         run: ruff check core scripts tests
 

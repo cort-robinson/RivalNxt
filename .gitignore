@@ -11,6 +11,7 @@ src-tauri/target/
 # Rust/Cargo specific ignores
 **/target/
 Cargo.lock
+!/tools/pak-repair/Cargo.lock
 Cargo.lock.backup
 .debug/
 debug/

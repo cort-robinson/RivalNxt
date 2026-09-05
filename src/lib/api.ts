@@ -1,5 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export interface CompatibilityResult {
+  path: string;
+  archive: "repair_needed" | "checked" | "repaired" | "blocked" | "failed";
+  game_compatibility: "unknown";
+  removed_entries?: string[];
+  content_notes?: string[];
+  error?: string;
+  backup_id?: string;
+}
+
+export interface CompatibilityReport {
+  results: CompatibilityResult[];
+  backups: { id: string; state: string; files: number; created_at?: string }[];
+}
+
+export const scanCompatibility = () => getJson<CompatibilityReport>("/api/compatibility");
+export const repairCompatibility = () => postJson<object, CompatibilityReport>("/api/compatibility/repair", {});
+export const restoreCompatibility = (id: string) => postJson<object, { state: string }>(`/api/compatibility/restore/${encodeURIComponent(id)}`, {});
+
 export class ApiError extends Error {
   status: number;
   detail?: unknown;

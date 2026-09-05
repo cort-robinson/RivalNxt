@@ -47,6 +47,7 @@ if str(_ROOT) not in _sys.path:
 	_sys.path.insert(0, str(_ROOT))
 
 from core.assets.zip_to_asset_paths import extract_pak_asset_map_from_folder
+from core.compatibility import service as compatibility
 from core.api.dependencies import get_db, verify_required_dns_hosts
 from core.api.services.handoffs import (
 	delete_handoff,
@@ -3975,7 +3976,7 @@ def ingest_nxm_handoff(handoff_id: str, payload: Optional[Dict[str, Any]] = Body
 
 	deactivated_ids: List[int] = []
 	deactivation_warnings: List[str] = []
-	if deactivate_existing:
+	if deactivate_existing and not activation_warning:
 		for old_id in ctx.get("active_download_ids", []):
 			if int(old_id) == new_download_id:
 				continue
@@ -4488,7 +4489,7 @@ def update_mod(mod_id: int, payload: Optional[Dict[str, Any]] = Body(default=Non
 
 	deactivated_ids: List[int] = []
 	deactivation_warnings: List[str] = []
-	for old_id in active_download_ids:
+	for old_id in (active_download_ids if not activation_warning else []):
 		if int(old_id) == new_download_id:
 			continue
 		try:
@@ -6727,6 +6728,7 @@ def delete_local_downloads_endpoint(payload: Dict[str, Any] = Body(...)) -> Dict
 
 
 @app.post("/api/mods/disable-all")
+@compatibility.serialized
 def disable_all_mods() -> Dict[str, Any]:
 	"""Disable all active mods and clear the ~mods folder."""
 	conn = get_db()
@@ -6775,7 +6777,37 @@ def disable_all_mods() -> Dict[str, Any]:
 			pass
 
 
+@app.get("/api/compatibility")
+@compatibility.serialized
+def get_compatibility() -> Dict[str, Any]:
+	root = _mods_folder_from_env()
+	backup_root = _get_current_settings().data_dir / "compatibility-backups"
+	return {"results": compatibility.scan(root), "backups": compatibility.backups(root, backup_root)}
+
+
+@app.post("/api/compatibility/repair")
+@compatibility.serialized
+def repair_compatibility() -> Dict[str, Any]:
+	root = _mods_folder_from_env()
+	backup_root = _get_current_settings().data_dir / "compatibility-backups"
+	return {"results": compatibility.repair_installed(root, backup_root),
+	        "backups": compatibility.backups(root, backup_root)}
+
+
+@app.post("/api/compatibility/restore/{backup_id}")
+@compatibility.serialized
+def restore_compatibility(backup_id: str) -> Dict[str, Any]:
+	try:
+		result = compatibility.restore(_mods_folder_from_env(),
+			_get_current_settings().data_dir / "compatibility-backups", backup_id)
+		scan_active_main(_get_scan_active_args())
+		return result
+	except (OSError, ValueError) as error:
+		raise HTTPException(status_code=409, detail=str(error)) from error
+
+
 @app.post("/api/local_downloads/{download_id}/set-active")
+@compatibility.serialized
 def set_active_paks(download_id: int, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 	"""Set the active pak list for a local_downloads row and mirror files into the game's ~mods folder.
 
@@ -7044,121 +7076,135 @@ def set_active_paks(download_id: int, payload: Dict[str, Any] = Body(...)) -> Di
 			pass
 		raise HTTPException(status_code=404, detail=f"Source archive not found: {src_path}")
 
-	# Activate: copy requested paks and their IoStore companions (.utoc, .ucas) if present
-	copied: List[str] = []
-	companions: List[str] = []
-	applied_set: set[str] = set()
-	if is_zip or is_rar or is_7z:
-		try:
-			entries = list_entries(src_path)
-			lookup = build_entry_lookup(entries)
-			for item in desired:
-				stem, _ext = os.path.splitext(item)
-				# For each stem, try to extract .pak, .utoc, .ucas if present
-				for ext in (".pak", ".utoc", ".ucas"):
-					fname = f"{stem}{ext}"
-					entry = resolve_entry(lookup, fname)
-					if not entry:
-						continue
-					dest_base = char_folder if char_folder else mods_dir
-					dest_fname = os.path.basename(fname)
-					dest = dest_base / dest_fname
-					if dest.exists():
-						try:
-							dest.unlink()
-						except Exception:
-							pass
-					extract_member(src_path, entry, str(dest))
-					applied_set.add(dest_fname)
-					if dest_fname.lower() == os.path.basename(item).lower():
-						copied.append(dest_fname)
-					else:
-						companions.append(dest_fname)
-		except HTTPException:
-			raise
-		except Exception as e:
-			raise HTTPException(status_code=500, detail=f"Archive extract failed: {e}")
-	elif is_pak:
-		# Single pak source; also copy sibling .utoc/.ucas if present alongside
-		base = os.path.basename(src_path)
-		if base in desired_basenames:
-			dest_base = char_folder if char_folder else mods_dir
-			dest = dest_base / base
+	# Stage and check the complete package before publishing any file.
+	compatibility_result = {"results": [], "game_compatibility": "unknown"}
+	with tempfile.TemporaryDirectory(prefix="rivalnxt-install-") as stage_dir:
+		staging = Path(stage_dir)
+		# Activate: copy requested paks and their IoStore companions (.utoc, .ucas) if present
+		copied: List[str] = []
+		companions: List[str] = []
+		applied_set: set[str] = set()
+		if is_zip or is_rar or is_7z:
 			try:
-				if dest.exists():
-					dest.unlink()
-				shutil.copy2(src_path, dest)
-			except Exception as e:
-				raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
-			copied.append(base)
-			applied_set.add(base)
-			# Try siblings for IoStore
-			stem, _ = os.path.splitext(base)
-			for ext in (".utoc", ".ucas"):
-				cand = Path(src_path).with_suffix(ext)
-				if cand.exists():
-					dest_base = char_folder if char_folder else mods_dir
-					d = dest_base / cand.name
-					try:
-						if d.exists():
-							d.unlink()
-						shutil.copy2(str(cand), d)
-					except Exception as e:
-						raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
-					companions.append(cand.name)
-					applied_set.add(cand.name)
-	elif is_folder:
-		# Folder source: copy files directly from folder (using variant-aware lookup)
-		src_folder = Path(src_path)
-		try:
-			for item in desired_basenames:
-				stem, _ext = os.path.splitext(item)
-				# Check if we have a relative path from the user's variant selection
-				rel_path = desired_source_map.get(item.lower(), "")
-				rel_stem = os.path.splitext(rel_path)[0] if rel_path else ""
-				# For each stem, try to copy .pak, .utoc, .ucas if present
-				for ext in (".pak", ".utoc", ".ucas"):
-					fname = f"{stem}{ext}"
-					src_file = None
-					# 1. Try exact relative path from the selected variant
-					if rel_stem:
-						variant_file = src_folder / f"{rel_stem}{ext}".replace("/", os.sep)
-						if variant_file.exists() and variant_file.is_file():
-							src_file = variant_file
-					# 2. Try direct path at folder root
-					if src_file is None:
-						direct = src_folder / fname
-						if direct.exists() and direct.is_file():
-							src_file = direct
-					# 3. Fallback: search recursively by basename
-					if src_file is None:
-						basename = os.path.basename(fname)
-						for candidate in src_folder.rglob(basename):
-							if candidate.is_file():
-								src_file = candidate
-								break
-					if src_file is None:
-						continue
-					dest_base = char_folder if char_folder else mods_dir
-					dest = dest_base / os.path.basename(fname)
-					try:
+				entries = list_entries(src_path)
+				lookup = build_entry_lookup(entries)
+				for item in desired:
+					stem, _ext = os.path.splitext(item)
+					# For each stem, try to extract .pak, .utoc, .ucas if present
+					for ext in (".pak", ".utoc", ".ucas"):
+						fname = f"{stem}{ext}"
+						entry = resolve_entry(lookup, fname)
+						if not entry:
+							continue
+						dest_base = staging
+						dest_fname = os.path.basename(fname)
+						dest = dest_base / dest_fname
 						if dest.exists():
-							dest.unlink()
-						shutil.copy2(str(src_file), str(dest))
-					except Exception as e:
-						raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
-					applied_set.add(os.path.basename(fname))
-					if os.path.basename(fname).lower() == item.lower():
-						copied.append(os.path.basename(fname))
-					else:
-						companions.append(os.path.basename(fname))
-		except HTTPException:
-			raise
-		except Exception as e:
-			raise HTTPException(status_code=500, detail=f"Folder copy failed: {e}")
-	else:
-		# For unknown sources, cannot auto-apply
-		raise HTTPException(status_code=400, detail="Unsupported source type for auto-apply. Use .zip/.rar/.7z/.pak or folder containing .pak files.")
+							try:
+								dest.unlink()
+							except Exception:
+								pass
+						extract_member(src_path, entry, str(dest))
+						applied_set.add(dest_fname)
+						if dest_fname.lower() == os.path.basename(item).lower():
+							copied.append(dest_fname)
+						else:
+							companions.append(dest_fname)
+			except HTTPException:
+				raise
+			except Exception as e:
+				raise HTTPException(status_code=500, detail=f"Archive extract failed: {e}")
+		elif is_pak:
+			# Single pak source; also copy sibling .utoc/.ucas if present alongside
+			base = os.path.basename(src_path)
+			if base in desired_basenames:
+				dest_base = staging
+				dest = dest_base / base
+				try:
+					if dest.exists():
+						dest.unlink()
+					shutil.copy2(src_path, dest)
+				except Exception as e:
+					raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
+				copied.append(base)
+				applied_set.add(base)
+				# Try siblings for IoStore
+				stem, _ = os.path.splitext(base)
+				for ext in (".utoc", ".ucas"):
+					cand = Path(src_path).with_suffix(ext)
+					if cand.exists():
+						dest_base = staging
+						d = dest_base / cand.name
+						try:
+							if d.exists():
+								d.unlink()
+							shutil.copy2(str(cand), d)
+						except Exception as e:
+							raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
+						companions.append(cand.name)
+						applied_set.add(cand.name)
+		elif is_folder:
+			# Folder source: copy files directly from folder (using variant-aware lookup)
+			src_folder = Path(src_path)
+			try:
+				for item in desired_basenames:
+					stem, _ext = os.path.splitext(item)
+					# Check if we have a relative path from the user's variant selection
+					rel_path = desired_source_map.get(item.lower(), "")
+					rel_stem = os.path.splitext(rel_path)[0] if rel_path else ""
+					# For each stem, try to copy .pak, .utoc, .ucas if present
+					for ext in (".pak", ".utoc", ".ucas"):
+						fname = f"{stem}{ext}"
+						src_file = None
+						# 1. Try exact relative path from the selected variant
+						if rel_stem:
+							variant_file = src_folder / f"{rel_stem}{ext}".replace("/", os.sep)
+							if variant_file.exists() and variant_file.is_file():
+								src_file = variant_file
+						# 2. Try direct path at folder root
+						if src_file is None:
+							direct = src_folder / fname
+							if direct.exists() and direct.is_file():
+								src_file = direct
+						# 3. Fallback: search recursively by basename
+						if src_file is None:
+							basename = os.path.basename(fname)
+							for candidate in src_folder.rglob(basename):
+								if candidate.is_file():
+									src_file = candidate
+									break
+						if src_file is None:
+							continue
+						dest_base = staging
+						dest = dest_base / os.path.basename(fname)
+						try:
+							if dest.exists():
+								dest.unlink()
+							shutil.copy2(str(src_file), str(dest))
+						except Exception as e:
+							raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
+						applied_set.add(os.path.basename(fname))
+						if os.path.basename(fname).lower() == item.lower():
+							copied.append(os.path.basename(fname))
+						else:
+							companions.append(os.path.basename(fname))
+			except HTTPException:
+				raise
+			except Exception as e:
+				raise HTTPException(status_code=500, detail=f"Folder copy failed: {e}")
+		else:
+			# For unknown sources, cannot auto-apply
+			raise HTTPException(status_code=400, detail="Unsupported source type for auto-apply. Use .zip/.rar/.7z/.pak or folder containing .pak files.")
+		if desired_basenames:
+			missing = [name for name in desired_basenames if not (staging / name).is_file()]
+			if missing:
+				raise HTTPException(status_code=400, detail="Requested PAK is missing from the source")
+			try:
+				compatibility_result = compatibility.install_staged(
+					staging, char_folder if char_folder else mods_dir,
+					_get_current_settings().data_dir / "compatibility-backups", root=mods_dir)
+			except Exception as error:
+				raise HTTPException(status_code=400, detail=f"Archive check failed. No new files were enabled: {error}") from error
 
 	# If nothing was newly extracted but files already existed, ensure they are considered applied
 	if not applied_set and (is_zip or is_rar or is_7z):
@@ -7288,12 +7334,14 @@ def set_active_paks(download_id: int, payload: Dict[str, Any] = Body(...)) -> Di
 		"download_id": download_id,
 		"active_paks": applied,
 		"copied": copied,
+		"compatibility": compatibility_result,
 		"removed": removed,
 		"mods_dir": str(mods_dir),
 	}
 
 
 @app.post("/api/local_downloads/activate-by-name")
+@compatibility.serialized
 def activate_by_name(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 	"""Activate all pak files for the given local_download name by extracting its archive to ~mods.
 
@@ -7314,107 +7362,18 @@ def activate_by_name(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 		except Exception:
 			pass
 		raise HTTPException(status_code=404, detail="local_download not found by name")
-	dl_id, rel_path, contents_json = row
-	# Resolve full path using helper; supports absolute, relative, or name lookup
-	full_path = _resolve_download_source_path(str(rel_path or name))
-	# Ensure destination ~mods exists
-	mods_dir = _mods_folder_from_env()
-	_ensure_dir(mods_dir)
-	# Determine target subfolder by inferred character tag
-	char_folder: Optional[Path] = None
+	dl_id, _rel_path, contents_json = row
 	try:
-		try:
-			contents = json.loads(contents_json) if contents_json else []
-		except Exception:
-			contents = []
-		candidate_paks = [c for c in contents if isinstance(c, str) and c.lower().endswith('.pak')]
-		tag = _infer_character_tag(cur, name=name, pak_candidates=candidate_paks)
-		if tag:
-			char_folder = mods_dir / _to_folder_name(tag)
-			_ensure_dir(char_folder)
-	except Exception:
-		char_folder = None
-	# Extract only the .pak files into ~mods
-	lower = full_path.lower()
-	copied: List[str] = []
-	companions: List[str] = []
-	applied_set: set[str] = set()
-	try:
-		if lower.endswith((".zip", ".rar", ".7z")):
-			entries = list_entries(full_path)
-			lookup = build_entry_lookup(entries)
-			try:
-				contents = json.loads(contents_json) if contents_json else []
-			except Exception:
-				contents = []
-			desired = [c for c in contents if isinstance(c, str) and c.lower().endswith('.pak')]
-			for pak in desired:
-				stem, _ = os.path.splitext(pak)
-				for ext in (".pak", ".utoc", ".ucas"):
-					fname = f"{stem}{ext}"
-					entry = resolve_entry(lookup, fname)
-					if not entry:
-						continue
-					dest_base = char_folder if char_folder else mods_dir
-					dest = dest_base / fname
-					if dest.exists():
-						applied_set.add(fname)
-						continue
-					extract_member(full_path, entry, str(dest))
-					applied_set.add(fname)
-					if ext == ".pak":
-						copied.append(fname)
-					else:
-						companions.append(fname)
-		elif lower.endswith(".pak"):
-			base = os.path.basename(full_path)
-			dest_base = char_folder if char_folder else mods_dir
-			dest = dest_base / base
-			if not dest.exists():
-				shutil.copy2(full_path, dest)
-				copied.append(base)
-				applied_set.add(base)
-			# Try siblings .utoc/.ucas
-			stem, _ = os.path.splitext(base)
-			for ext in (".utoc", ".ucas"):
-				cand = Path(full_path).with_suffix(ext)
-				if cand.exists():
-					dest_base = char_folder if char_folder else mods_dir
-					d = dest_base / cand.name
-					if not d.exists():
-						shutil.copy2(str(cand), d)
-						companions.append(cand.name)
-						applied_set.add(cand.name)
-		else:
-			raise HTTPException(status_code=400, detail="Unsupported source type for activation. Use .zip/.rar/.7z/.pak")
-	except HTTPException:
-		raise
-	except Exception as e:
-		raise HTTPException(status_code=500, detail=f"Activation failed: {e}")
-	# Update DB active_paks and rescan
-	try:
-		if copied or companions or applied_set:
-			# Merge copied into current active for this download id
-			try:
-				prev = cur.execute("SELECT active_paks FROM local_downloads WHERE id=?", (dl_id,)).fetchone()
-				active = []
-				if prev and prev[0]:
-					active = json.loads(prev[0]) if isinstance(prev[0], str) else []
-				merged = list({*(active or []), *copied, *companions, *applied_set})
-				update_local_download_active_paks(conn, dl_id, merged)
-			except Exception:
-				pass
-		scan_active_main(_get_scan_active_args())
-		_safe_rebuild_conflicts(conn, active_only=True, purpose="activate_by_name")
+		contents = json.loads(contents_json) if contents_json else []
 	finally:
-		try:
-			conn.close()
-		except Exception:
-			pass
-	return {"ok": True, "name": name, "copied": copied, "mods_dir": str(mods_dir)}
+		conn.close()
+	desired = [item for item in contents if isinstance(item, str) and item.lower().endswith(".pak")]
+	result = set_active_paks(int(dl_id), {"active_paks": desired})
+	return {**result, "name": name}
 
 
 @app.post("/api/local_downloads/deactivate-by-name")
+@compatibility.serialized
 def deactivate_by_name(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 	"""Deactivate (remove) all pak files for the given local_download name from ~mods and DB.
 

@@ -1,0 +1,8 @@
+[package]
+name = "rivalnxt-pak-repair"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+repak = { git = "https://github.com/natimerry/repak-rivals", rev = "56cce699c29c37a658b4c453ed2283aa59245bb3", default-features = false, features = ["encryption"] }

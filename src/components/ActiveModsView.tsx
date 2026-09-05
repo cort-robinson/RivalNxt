@@ -3,6 +3,7 @@ import type { Mod } from "./ModCard";
 import { InstalledModCard } from "./InstalledModCard";
 import { VirtualizedModList, useGridColumns } from "./VirtualizedModList";
 import { SearchHeader } from "./SearchHeader";
+import { CompatibilityPanel } from "./CompatibilityPanel";
 import { LazyModModal as ModModal } from "./LazyModModal";
 import {
   categoriesMatchTag,
@@ -365,6 +366,7 @@ export function ActiveModsView({
   return (
     <>
       <div className="flex flex-col h-full">
+        <CompatibilityPanel />
         {/* Search Header */}
         <SearchHeader
           searchQuery={searchQuery}
