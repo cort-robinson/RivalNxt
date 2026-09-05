@@ -5,7 +5,6 @@ Check if skin 1029303 exists in official patch PAKs (not mods)
 import sys
 import re
 from pathlib import Path
-from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -64,7 +63,7 @@ for pak_name, assets in official_patches.items():
             print(f"  Skin IDs: {', '.join(sorted(skin_ids))}")
             
             if '1029303' in skin_ids:
-                print(f"  ✅ CONTAINS 1029303!")
+                print("  ✅ CONTAINS 1029303!")
 
 # Summary
 print(f"\n{'='*60}")
@@ -85,7 +84,7 @@ else:
         all_magik_skins.update(skins)
     
     if all_magik_skins:
-        print(f"\nOfficial Magik skins from patches:")
+        print("\nOfficial Magik skins from patches:")
         for sid in sorted(all_magik_skins):
             variant = sid[4:]
             print(f"  {sid} (variant {variant})")

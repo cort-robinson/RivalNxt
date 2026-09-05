@@ -2,8 +2,17 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 import os
 from pathlib import Path
+import subprocess
+
+# Build the pinned metadata worker and include it in every backend package.
+subprocess.run(['cargo', 'build', '--release', '--locked', '--manifest-path',
+                'tools/pak-repair/Cargo.toml'], check=True)
+repair_worker = Path('tools/pak-repair/target/release') / (
+    'rivalnxt-pak-repair.exe' if os.name == 'nt' else 'rivalnxt-pak-repair')
 
 datas = []
+datas.append((str(repair_worker), 'pak-repair'))
+datas.append(('tools/pak-repair/LICENSE-repak', 'pak-repair'))
 datas += collect_data_files('core.db.migrations')
 
 # Include character_ids.json for entity tagging

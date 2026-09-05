@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import core.api.server as server
+from test_compatibility import make_pak
 from core.api.server import _index_lookup, _index_mods_dir, _resolve_desired_paks
 
 
@@ -270,7 +271,7 @@ def activation_env(monkeypatch, tmp_path, schema_db):
     # The download's source folder holding the paks to copy in.
     src = downloads / "TheMod"
     src.mkdir()
-    (src / "fresh.pak").write_bytes(b"\x01")
+    make_pak(src / "fresh.pak", ["Marvel/Content/Marvel/Characters/fresh.uasset"])
 
     import core.config.settings as settings_mod
 
@@ -281,6 +282,7 @@ def activation_env(monkeypatch, tmp_path, schema_db):
             settings_mod.SETTINGS,
             marvel_rivals_root=game_root,
             marvel_rivals_local_downloads_root=downloads,
+            data_dir=tmp_path / "data",
         ),
     )
 
@@ -346,6 +348,52 @@ def test_activation_copies_the_requested_pak(activation_env):
     server.set_active_paks(1, {"active_paks": ["fresh.pak"]})
     copied = list(mods_dir.rglob("fresh.pak"))
     assert copied, "requested pak was not copied into ~mods"
+
+
+def test_activation_repairs_before_enabling_and_preserves_source(activation_env):
+    from core.compatibility.pak import inspect
+    source = make_pak(activation_env["src"] / "fresh.pak")
+    original = source.read_bytes()
+    result = server.set_active_paks(1, {"active_paks": ["fresh.pak"]})
+    installed = next(activation_env["mods_dir"].rglob("fresh.pak"))
+    assert not inspect(installed).removed
+    assert source.read_bytes() == original
+    assert result["compatibility"]["results"][0]["archive"] == "repaired"
+
+
+def test_failed_activation_keeps_previous_files_and_db(activation_env):
+    from fastapi import HTTPException
+    (activation_env["src"] / "fresh.pak").write_bytes(b"damaged archive")
+    with pytest.raises(HTTPException, match="Archive check failed"):
+        server.set_active_paks(1, {"active_paks": ["fresh.pak"]})
+    assert (activation_env["mods_dir"] / "stale.pak").exists()
+    active = activation_env["db"].execute("SELECT active_paks FROM local_downloads WHERE id=1").fetchone()[0]
+    assert json.loads(active) == ["stale.pak"]
+
+
+def test_by_name_uses_the_same_archive_check(activation_env):
+    from fastapi import HTTPException
+    # Only select the source package; stale.pak belongs to a previous version.
+    activation_env["db"].execute("UPDATE local_downloads SET contents=? WHERE id=1", (json.dumps(["fresh.pak"]),))
+    (activation_env["src"] / "fresh.pak").write_bytes(b"bad")
+    with pytest.raises(HTTPException, match="Archive check failed"):
+        server.activate_by_name({"name": "The Mod"})
+    assert (activation_env["mods_dir"] / "stale.pak").exists()
+
+
+def test_compatibility_http_scan_repair_and_restore(activation_env):
+    from fastapi.testclient import TestClient
+    server.set_active_paks(1, {"active_paks": ["fresh.pak"]})
+    client = TestClient(server.app)
+    report = client.get("/api/compatibility")
+    assert report.status_code == 200
+    body = report.json()
+    assert body["backups"]
+    assert all(row["game_compatibility"] == "unknown" for row in body["results"])
+    assert client.post("/api/compatibility/repair").status_code == 200
+    restored = client.post("/api/compatibility/restore/" + body["backups"][0]["id"])
+    assert restored.status_code == 200, restored.text
+    assert not list(activation_env["mods_dir"].rglob("fresh.pak"))
 
 
 def test_activation_removes_stale_files(activation_env):

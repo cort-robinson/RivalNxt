@@ -33,15 +33,15 @@ try:
         has_303 = any(s['variant'] == '303' for s in char_1029['skins'])
         
         if has_303:
-            print(f"\n✅ Variant 303 exists!")
+            print("\n✅ Variant 303 exists!")
         else:
-            print(f"\n❌ Variant 303 NOT FOUND")
-            print(f"\nVariants with 3xx:")
+            print("\n❌ Variant 303 NOT FOUND")
+            print("\nVariants with 3xx:")
             for skin in char_1029['skins']:
                 if skin['variant'].startswith('3'):
                     print(f"  {skin['variant']} -> {skin['name']}")
     else:
-        print(f"\n❌ Character 1029 not found in database")
+        print("\n❌ Character 1029 not found in database")
         print("\nAvailable characters:")
         for char in sorted(characters, key=lambda c: c['character_id'])[:10]:
             print(f"  {char['character_id']} -> {char['name']}")

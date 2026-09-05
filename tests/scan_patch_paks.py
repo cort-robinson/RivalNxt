@@ -64,7 +64,7 @@ for pak_name, skin_ids in skin_ids_by_pak.items():
         found_in.append(pak_name)
 
 if found_in:
-    print(f"\n✅ Skin 1029303 FOUND in:")
+    print("\n✅ Skin 1029303 FOUND in:")
     for pak in found_in:
         print(f"  • {pak}")
 else:

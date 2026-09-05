@@ -124,7 +124,6 @@ def search_skin_in_locres():
         
         # Search for 1029303
         found_entries = []
-        search_patterns = ['1029303', '1029_303', 'magik']
         
         for ns_name, namespace in lf.namespaces.items():
             for entry_key, entry in namespace.entrys.items():

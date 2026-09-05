@@ -38,7 +38,7 @@ try:
     lf = LocresFile()
     lf.read(str(en_file))
     
-    print(f"\nSearching ALL namespaces and entries for '1029303'...\n")
+    print("\nSearching ALL namespaces and entries for '1029303'...\n")
     
     found_entries = []
     total_namespaces = 0
@@ -57,7 +57,7 @@ try:
                     'value': entry.translation
                 })
     
-    print(f"Searched:")
+    print("Searched:")
     print(f"  - {total_namespaces} namespaces")
     print(f"  - {total_entries:,} total entries")
     
@@ -104,7 +104,7 @@ try:
             print(f"  {sid} (variant {variant})")
         
         if '1029303' not in unique_skin_ids:
-            print(f"\n⚠️ Confirmed: 1029303 is NOT in the locres file")
+            print("\n⚠️ Confirmed: 1029303 is NOT in the locres file")
             print("   Skin exists in PAK assets but has no name entry")
 
 finally:

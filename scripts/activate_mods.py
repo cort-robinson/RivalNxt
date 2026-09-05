@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import shutil
+import tempfile
 
 # Ensure repo root on path
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(ROOT) not in sys.path:
 from core.db.db import get_connection, init_schema, rebuild_conflicts, update_local_download_active_paks
 from core.ingestion.scan_active_mods import main as scan_active_main
 from core.utils.archive import build_entry_lookup, list_entries, extract_member, resolve_entry
+from core.compatibility.service import install_staged
 
 
 def _load_env_mods_folder() -> Path:
@@ -114,29 +116,31 @@ def main(argv=None) -> int:
         lower = full_path.lower()
         mods_dir = _load_env_mods_folder()
         copied: list[str] = []
-        if lower.endswith(('.zip', '.rar', '.7z')):
-            entries = list_entries(full_path)
-            lookup = build_entry_lookup(entries)
-            for pak in desired:
-                dest = mods_dir / pak
-                if dest.exists():
-                    continue
-                member = resolve_entry(lookup, pak)
-                if not member:
-                    print(f"Warning: {pak} not found in archive; skipping")
-                    continue
-                extract_member(full_path, member, str(dest))
-                copied.append(pak)
-        elif lower.endswith('.pak'):
-            base = os.path.basename(full_path)
-            if base in desired:
-                dest = mods_dir / base
-                if not dest.exists():
-                    shutil.copy2(full_path, dest)
-                    copied.append(base)
-        else:
-            print("Unsupported source type; use .zip/.rar/.7z/.pak")
-            return 3
+        with tempfile.TemporaryDirectory(prefix="rivalnxt-cli-install-") as temp:
+            staging = Path(temp)
+            if lower.endswith(('.zip', '.rar', '.7z')):
+                lookup = build_entry_lookup(list_entries(full_path))
+                for pak in desired:
+                    for ext in ('.pak', '.utoc', '.ucas'):
+                        filename = str(Path(pak).with_suffix(ext))
+                        member = resolve_entry(lookup, filename)
+                        if member:
+                            extract_member(full_path, member, str(staging / filename))
+            elif lower.endswith('.pak'):
+                if os.path.basename(full_path) in desired:
+                    for ext in ('.pak', '.utoc', '.ucas'):
+                        source = Path(full_path).with_suffix(ext)
+                        if source.exists():
+                            shutil.copy2(source, staging / source.name)
+            else:
+                print("Unsupported source type; use .zip/.rar/.7z/.pak")
+                return 3
+            if any(not (staging / pak).is_file() for pak in desired):
+                raise ValueError("Requested PAK is missing from the source")
+            from core.config.settings import SETTINGS
+            result = install_staged(staging, mods_dir, SETTINGS.data_dir / "compatibility-backups")
+            print(json.dumps(result))
+            copied = [path.name for path in staging.iterdir() if path.is_file()]
         # Update DB active_paks = union(previous, copied) or desired if selecting subset
         prev_row = cur.execute("SELECT active_paks FROM local_downloads WHERE id=?", (dl_id,)).fetchone()
         prev = []
