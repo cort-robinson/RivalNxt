@@ -186,6 +186,7 @@ rm -rf dist build
 
 echo "Building backend executable using spec file..."
 python -m PyInstaller --noconfirm --clean rivalnxt_backend_merged.spec
+python scripts/verify_bundle.py dist/rivalnxt_backend
 
 if [ ! -f "dist/rivalnxt_backend" ]; then
     echo "ERROR: Backend executable not found in dist directory!"

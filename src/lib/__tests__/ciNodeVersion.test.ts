@@ -171,11 +171,7 @@ describe("ci.yml frontend job Node version", () => {
     ).toBe(true);
   });
 
-  it("the build-only jobs may stay on an older Node, and that is recorded", () => {
-    // Not a bug: vite 6 supports 18 and those jobs never run vitest. Asserted so
-    // that if someone bumps them, the reason this job differs is re-examined
-    // rather than silently drifting.
-    expect(nodeVersionForJob(yml, "desktop")).toBe("18");
-    expect(yml).toMatch(/desktop job below and release\.yml stay on 18/);
+  it("desktop and release builds use the supported frontend runtime", () => {
+    expect(nodeVersionForJob(yml, "desktop")).toBe("22");
   });
 });

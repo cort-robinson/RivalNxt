@@ -20,7 +20,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "22"
           cache: "npm"
 
       - name: Setup Python
@@ -148,6 +148,8 @@ jobs:
 
           echo "Building backend executable using spec file..."
           python -m PyInstaller --noconfirm --clean rivalnxt_backend_merged.spec
+          python scripts/verify_bundle.py dist/rivalnxt_backend.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           if (-not (Test-Path dist\rivalnxt_backend.exe)) {
             Write-Error "Backend executable not found!"

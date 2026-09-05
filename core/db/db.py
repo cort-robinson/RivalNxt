@@ -1090,8 +1090,15 @@ def replace_local_downloads(conn: sqlite3.Connection, rows: Iterable[Dict[str, A
             ON CONFLICT(path) DO UPDATE SET
                 id=excluded.id,
                 name=excluded.name,
-                mod_id=excluded.mod_id,
-                version=excluded.version,
+                -- A rescan often cannot read an id out of the filename: the
+                -- download was renamed, or Nexus wrote it in a shape the parser
+                -- does not know. Overwriting a known id with NULL there
+                -- silently ungroups the mod, and every rebuild did it again --
+                -- an "Addons" download separating from its base mod and taking
+                -- its artwork with it, because both are keyed on the mod id.
+                -- A rescan that *does* find an id still wins; only NULL loses.
+                mod_id=COALESCE(excluded.mod_id, local_downloads.mod_id),
+                version=COALESCE(excluded.version, local_downloads.version),
                 contents=excluded.contents,
                 active_paks=excluded.active_paks,
                 created_at=COALESCE(excluded.created_at, local_downloads.created_at)
@@ -1105,6 +1112,43 @@ def replace_local_downloads(conn: sqlite3.Connection, rows: Iterable[Dict[str, A
     if stale_paths:
         placeholders = ",".join("?" for _ in stale_paths)
         cur.execute(f"DELETE FROM local_downloads WHERE path IN ({placeholders});", tuple(stale_paths))
+
+    # Re-apply mod ids the user assigned by hand.
+    #
+    # mod_id is derived by parsing the download's filename, and this function
+    # overwrites it from that parse on every rebuild. A file the app has renamed
+    # no longer carries a parseable id, so "Initial Database Build" set mod_id
+    # back to NULL and the download detached from its mod — the same mod then
+    # appeared twice in the list, once with artwork and once as a nameless entry
+    # asking to have its id assigned. Again, every rebuild.
+    #
+    # mod_id_overrides is the record of an explicit decision, so it outranks the
+    # filename guess rather than only filling in for it.
+    try:
+        cur.execute(
+            """
+            UPDATE local_downloads
+               SET mod_id = (
+                   SELECT o.nexus_mod_id FROM mod_id_overrides o
+                    WHERE o.local_path = local_downloads.path
+               )
+             WHERE EXISTS (
+                   SELECT 1 FROM mod_id_overrides o
+                    WHERE o.local_path = local_downloads.path
+               )
+               AND mod_id IS NOT (
+                   SELECT o.nexus_mod_id FROM mod_id_overrides o
+                    WHERE o.local_path = local_downloads.path
+               );
+            """
+        )
+        restored = cur.rowcount or 0
+        if restored:
+            print(f"[db] Re-applied {restored} manual mod id assignment(s).")
+    except sqlite3.OperationalError:
+        # Database predates 0016_mod_id_overrides; nothing to re-apply.
+        pass
+
     conn.commit()
     return inserted
 
@@ -1535,6 +1579,38 @@ def upsert_mod_info(
             author_member_id,
         ),
     )
+
+    # A newly arrived Nexus picture must not take over a mod the user has
+    # already given artwork to.
+    #
+    # The card shows the Nexus picture unless a custom image is explicitly
+    # starred, so simply storing picture_url silently replaced whatever the user
+    # was looking at — on every metadata sync, not just the first. Starring the
+    # image they already had turns "no choice recorded" into their choice, which
+    # is what it always effectively was. A mod with no images of its own is left
+    # alone: there the Nexus picture is the only thing to show.
+    if picture_url:
+        try:
+            cur = conn.cursor()
+            already_chosen = cur.execute(
+                "SELECT 1 FROM mod_custom_images WHERE mod_id = ? AND is_preview = 1 LIMIT 1",
+                (mod_id,),
+            ).fetchone()
+            if not already_chosen:
+                first = cur.execute(
+                    "SELECT id FROM mod_custom_images WHERE mod_id = ? "
+                    "ORDER BY COALESCE(sort_order, id) ASC, id ASC LIMIT 1",
+                    (mod_id,),
+                ).fetchone()
+                if first:
+                    cur.execute(
+                        "UPDATE mod_custom_images SET is_preview = 1 WHERE id = ?",
+                        (first[0],),
+                    )
+        except sqlite3.OperationalError:
+            # Database predates the custom-images table; nothing to protect.
+            pass
+
     conn.commit()
 
 def replace_mod_files(
