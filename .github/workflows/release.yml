@@ -10,6 +10,8 @@ env:
 
 jobs:
   build-and-release:
+    # Keep an installer uploaded before publication; do not replace verified assets.
+    if: ${{ !contains(join(github.event.release.assets.*.name, ','), '_x64-setup.exe') }}
     runs-on: windows-latest
     steps:
       - name: Checkout repository

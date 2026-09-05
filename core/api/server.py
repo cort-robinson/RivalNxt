@@ -8161,7 +8161,7 @@ def _infer_character_tag(
 		# library this was found in. No tags meant no character, so the mod was
 		# filed at the root of ~mods and stayed there. The user's own tag was
 		# the only thing that worked, because step 1 above runs before this.
-		pak = os.path.basename(raw_pak)
+		pak = raw_pak.replace("\\", "/").rsplit("/", 1)[-1]
 		tr = cur.execute("SELECT tags_json FROM pak_tags_json WHERE pak_name = ?", (pak,)).fetchone()
 		if (not tr or not tr[0]) and "." in pak:
 			stem = os.path.splitext(pak)[0]
