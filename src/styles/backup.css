@@ -1,0 +1,10 @@
+.backup-modal {
+  --backup-sky: #0369a1;
+  --backup-violet: #6d28d9;
+  --backup-amber: #92400e;
+}
+.dark .backup-modal {
+  --backup-sky: #7dd3fc;
+  --backup-violet: #c4b5fd;
+  --backup-amber: #fcd34d;
+}

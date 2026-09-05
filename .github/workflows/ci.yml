@@ -61,10 +61,7 @@ jobs:
           # killed by the 15 minute timeout, which reads as "cancelled" rather
           # than a clear version error.
           #
-          # The desktop job below and release.yml stay on 18 deliberately: they
-          # only build (vite 6 supports 18) and the desktop job exists to mirror
-          # release.yml's chain, so bumping one without the other would defeat it.
-          # ciNodeVersion.test.ts asserts this pin stays compatible.
+          # Desktop and release builds use the same runtime for Tailwind.
           node-version: "22"
           cache: "npm"
 
@@ -101,7 +98,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "22"
           cache: "npm"
 
       - uses: actions/setup-python@v5
@@ -153,6 +150,8 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean rivalnxt_backend_merged.spec
+          python scripts/verify_bundle.py dist/rivalnxt_backend.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path dist\rivalnxt_backend.exe)) {
             Write-Error "Backend executable not found"; exit 1
           }

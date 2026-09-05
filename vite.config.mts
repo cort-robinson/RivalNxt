@@ -1,10 +1,16 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
+import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 
 export default defineConfig({
   base: "./",
-  plugins: [react()],
+  // Tailwind generates the utility CSS from the source at build time.
+  // src/index.css used to be a committed snapshot of that output, so any class
+  // added after the snapshot was taken had no rule and silently did nothing —
+  // 452 of the 646 classes the UI used were dead, which is why padding, margins
+  // and icon sizes were missing all over the app.
+  plugins: [react(), tailwindcss()],
   resolve: {
     extensions: [".js", ".jsx", ".ts", ".tsx", ".json"],
     alias: {

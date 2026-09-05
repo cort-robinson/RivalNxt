@@ -5,3 +5,6 @@ pytest-cov>=4.1.0
 httpx>=0.27.0
 ruff>=0.6.0
 python-dateutil>=2.8.2
+
+# Native extension builder used by build_local.bat/build_local.sh.
+maturin>=1.7.0,<2
