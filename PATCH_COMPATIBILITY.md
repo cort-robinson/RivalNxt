@@ -24,10 +24,16 @@ The existing `rust-ue-tools` submodule stays at its upstream revision.
 ## Use
 
 1. Close the game and other mod tools.
-2. In the active mods view, open **Patch compatibility**.
-3. Select **Scan installed mods**.
-4. Select **Repair old indexes** if the scan finds old entries.
+2. In the active mods view, find **Patch compatibility**.
+3. Select **Check mods**.
+4. Select **Repair packages** if the scan finds old entries. The button shows the number to repair.
 5. Read each result. A repaired index does not confirm that the mod works in the game.
+
+A clean scan shows one summary. Use **View results** to inspect individual
+packages. If a package needs repair or could not be checked, **Review packages**
+shows those packages first. **All packages** reveals the full list. Select a
+package to see its original filename and technical details. **About this check**
+explains the file checks and why package counts can differ from mod counts.
 
 The scan is limited to the configured `~mods` folder. It does not search the
 normal game PAK folder, reset settings, delete movie files, or change loaders.
@@ -72,7 +78,7 @@ Replacements use a temporary file on the destination volume and `os.replace`.
 A multi-file publish failure starts rollback. The manifest is saved before the
 first replacement, so an interrupted operation remains visible after restart.
 
-Open **Restore saved files** to restore a backup. Restore checks all saved and
+Open **Backups** to restore a backup. Restore checks all saved and
 current hashes before it starts. It stops if a file or companion has changed
 since the operation. It does not overwrite later edits. A restored first install
 removes only the new files recorded in that install. Original backup files remain.
@@ -106,15 +112,15 @@ Checks completed in this worktree:
 - 372 backend tests passed. These include encrypted and plain indexes, mixed
   content, repeated repair, bad archives, missing companions, copy and backup
   failures, partial install rollback, interrupted journals, and guarded restore.
-- 188 frontend tests passed, including repair status, restore, and error recovery.
+- 195 frontend tests passed, including compact results, attention filters, repair, restore, and error recovery.
 - All 210 original PAK samples from the prior backup were copied to temporary
   storage. Their repairs passed retained-record and data-prefix checks.
 - TypeScript, the frontend build, the native Python module, the repair worker,
   the PyInstaller backend, and the Tauri Windows installer built successfully.
 - The changed Python files passed Ruff. The full repository check found 25
   existing lint errors in older test scripts.
-- Browser controls and result text were checked with synthetic data. Screenshot
-  capture timed out, so a full visual screenshot check is not claimed.
+- Browser controls and screenshots were checked with synthetic data in light and
+  dark themes, including clean results and packages needing attention.
 - `graphify update .` could not run: the command and graph output were absent.
 
 The game and the built application were not started. No installed game file,

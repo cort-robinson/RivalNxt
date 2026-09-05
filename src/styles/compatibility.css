@@ -1,26 +1,113 @@
 .compatibility-panel {
   flex-shrink: 0;
+  color: var(--foreground);
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.5;
   overflow-wrap: anywhere;
-  max-height: 60vh;
-  overflow-y: auto;
 }
-
+.compatibility-overview,
+.compatibility-footer,
+.compatibility-result-controls,
+.compatibility-backups > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+}
+.compatibility-copy { min-width: 0; }
+.compatibility-copy h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.compatibility-panel p { margin: 0; }
+.compatibility-summary { font-size: 14px; }
+.compatibility-meta,
+.compatibility-footer,
+.compatibility-hint { color: var(--muted-foreground); }
+.compatibility-footer { margin-top: 12px; flex-wrap: wrap; }
+.compatibility-actions,
+.compatibility-links,
+.compatibility-filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.compatibility-actions { flex-shrink: 0; gap: 8px; }
+.compatibility-panel .compatibility-hint,
+.compatibility-panel .compatibility-error { margin-top: 12px; }
+.compatibility-error { font-weight: 500; }
+.compatibility-links button {
+  padding: 2px 0;
+  color: var(--foreground);
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.compatibility-links button:hover { color: var(--muted-foreground); }
+.compatibility-links button[aria-expanded="true"] { font-weight: 600; }
 .compatibility-panel summary:focus-visible,
+.compatibility-panel button:focus-visible,
 .compatibility-results:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 3px;
 }
-
-.compatibility-intro {
-  max-width: 72ch;
+.compatibility-expanded {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
 }
-
-.compatibility-results {
-  max-height: 16rem;
-  overflow-y: auto;
+.compatibility-result-controls { flex-wrap: wrap; margin-bottom: 8px; }
+.compatibility-filters { gap: 4px; }
+.compatibility-filters button {
+  border: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--muted-foreground);
+  background: transparent;
 }
-
+.compatibility-filters button[aria-pressed="true"],
+.compatibility-filters button:hover { color: var(--foreground); background: var(--accent); }
+.compatibility-results,
 .compatibility-backups {
-  max-height: 12rem;
+  max-height: min(28vh, 240px);
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted-foreground) transparent;
+  list-style: none;
+  padding: 0 8px 0 0;
+  margin: 0;
+}
+.compatibility-results > li + li,
+.compatibility-backups > li + li { border-top: 1px solid var(--border); }
+.compatibility-package summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  cursor: pointer;
+  list-style: none;
+}
+.compatibility-package summary::-webkit-details-marker { display: none; }
+.compatibility-package summary:hover { background: var(--accent); }
+.compatibility-package-name { flex: 1; min-width: 0; }
+.compatibility-package-status { color: var(--muted-foreground); flex-shrink: 0; }
+.compatibility-package summary svg { flex-shrink: 0; }
+.compatibility-package[open] summary svg { transform: rotate(180deg); }
+.compatibility-package-details { padding: 0 0 12px; }
+.compatibility-package-details dl { margin: 8px 0 0; }
+.compatibility-package-details dt { font-weight: 500; margin-top: 8px; }
+.compatibility-package-details dd { color: var(--muted-foreground); margin: 2px 0 0; }
+.compatibility-backups > li { padding: 10px 0; }
+.compatibility-explanation { max-width: 72ch; }
+.compatibility-explanation p + p { margin-top: 8px; }
+@media (max-width: 760px) {
+  .compatibility-panel { padding: 16px; }
+  .compatibility-overview { align-items: flex-start; flex-wrap: wrap; }
+  .compatibility-footer { align-items: flex-start; gap: 8px; }
+  .compatibility-package summary { flex-wrap: wrap; gap: 4px 12px; }
 }
