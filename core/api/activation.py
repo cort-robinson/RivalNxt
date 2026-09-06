@@ -38,13 +38,13 @@ def run(operation):
 @router.post("/preview")
 @compatibility.serialized
 def preview(payload: dict = Body(...)):
-    return run(lambda: service().preview(payload.get("entries"), payload.get("download_paths")))
+    return run(lambda: service().preview(payload.get("entries"), payload.get("download_paths"), payload.get("metadata")))
 
 
 @router.post("/apply")
 @compatibility.serialized
 def apply(payload: dict = Body(...)):
-    return run(lambda: service().apply(payload.get("entries"), payload.get("token"), payload.get("download_paths")))
+    return run(lambda: service().apply(payload.get("entries"), payload.get("token"), payload.get("download_paths"), payload.get("metadata")))
 
 
 @router.post("/keep-preview")

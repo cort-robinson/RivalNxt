@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 REQUIRED = ("PIL", "fastapi", "uvicorn", "requests", "rust_ue_tools", "Crypto",
-            "core.activation", "core.activity", "core.diagnostics", "core.api.activation", "core.api.recovery_gate")
+            "core.activation", "core.activation_metadata", "core.activity", "core.diagnostics", "core.api.activation", "core.api.recovery_gate")
 
 
 def bundle_entries(exe: Path) -> set[str]:

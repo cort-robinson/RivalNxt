@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 
 from core.compatibility import service as compatibility
+from core import activation_metadata
 
 
 class ActivationError(ValueError):
@@ -87,7 +88,7 @@ def read_pending_recovery(data_dir):
 def _pending(journal_root):
     for path in journal_root.glob("*/journal.json"):
         try:
-            if json.loads(path.read_text(encoding="utf-8"))["state"] in ("applying", "step_in_progress", "rollback_failed"):
+            if json.loads(path.read_text(encoding="utf-8"))["state"] in ("applying", "step_in_progress", "metadata_in_progress", "rollback_failed"):
                 return True
         except (OSError, ValueError, KeyError):
             return True
@@ -127,7 +128,7 @@ class ActivationService:
         return rows, sources, _files(self.mods_root)
 
     @compatibility.serialized
-    def preview(self, entries, download_paths=None):
+    def preview(self, entries, download_paths=None, metadata=None):
         if not isinstance(entries, dict) or len(entries) > 10000:
             raise ActivationError("The preset must contain a download-to-files mapping.")
         target = {}
@@ -144,6 +145,14 @@ class ActivationService:
             ):
                 raise ActivationError("The preset contains invalid download IDs or file paths.")
             target[str(int(key))] = sorted(set(paks))
+        conn = self.get_db()
+        try:
+            metadata = activation_metadata.validate(conn, metadata)
+            metadata_fingerprint = activation_metadata.fingerprint(conn, metadata)
+        except activation_metadata.MetadataError as error:
+            raise ActivationError(str(error)) from error
+        finally:
+            conn.close()
         rows, sources, files = self._state()
         known = {str(row["id"]): row for row in rows}
         missing = [{"download_id": int(key), "name": f"Download {key}", "reason": "Download is no longer installed"}
@@ -162,11 +171,11 @@ class ActivationService:
                                 "files": unavailable})
             if sorted(current) != desired:
                 changes.append({"download_id": row["id"], "name": row["name"], "before": current, "after": desired})
-        fingerprint = hashlib.sha256(_json([rows, sources, files, target, download_paths]).encode()).hexdigest()
+        fingerprint = hashlib.sha256(_json([rows, sources, files, target, download_paths, metadata, metadata_fingerprint]).encode()).hexdigest()
         pending = self.pending_recovery()
         return {"token": fingerprint, "entries": target, "changes": changes,
                 "missing": missing, "can_apply": not missing and not pending, "recovery_required": pending,
-                "download_paths": download_paths}
+                "download_paths": download_paths, "metadata": metadata, "metadata_fingerprint": metadata_fingerprint}
 
     def pending_recovery(self):
         return _pending(self.journal_root)
@@ -180,6 +189,24 @@ class ActivationService:
             shutil.rmtree(resolved)
         except OSError:
             logging.getLogger(__name__).warning("Completed activation journal could not be removed: %s", folder)
+            return
+        # A receipt is needed only while its journal exists. Never remove it
+        # first: a crash in that order could undo files after metadata commits.
+        conn = None
+        try:
+            conn = self.get_db()
+            if activation_metadata.committed(conn, folder.name):
+                conn.execute("DELETE FROM activation_metadata_commits WHERE journal_id=?", (folder.name,))
+                conn.commit()
+        except Exception:
+            logging.getLogger(__name__).warning("Completed restore receipt could not be removed")
+        finally:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:
+                    logging.getLogger(__name__).warning("Completed restore cleanup connection could not be closed")
 
     def _hashes(self):
         return {relative: compatibility.digest(compatibility.safe_path(self.mods_root, relative))
@@ -209,7 +236,22 @@ class ActivationService:
         _write(folder / "journal.json", manifest)
         return folder, manifest
 
+    def _metadata_committed(self, folder, manifest):
+        if not manifest.get("metadata"):
+            return False
+        conn = self.get_db()
+        try:
+            return activation_metadata.committed(conn, folder.name)
+        finally:
+            conn.close()
+
     def _rollback(self, folder, manifest):
+        # The receipt shares the metadata commit. A crash after that commit is
+        # a completed restore, even if the filesystem marker was not written.
+        if self._metadata_committed(folder, manifest):
+            manifest["state"] = "committed"
+            _write(folder / "journal.json", manifest)
+            return
         if manifest["root"] != str(self.mods_root):
             raise ActivationError("The game folder changed. Restore its original setting before recovery.")
         if manifest["state"] == "step_in_progress":
@@ -272,7 +314,7 @@ class ActivationService:
                 state = manifest["state"]
             except (OSError, ValueError, KeyError) as error:
                 raise ActivationError("An activation journal cannot be read. Keep the activation-journals folder for manual recovery.") from error
-            if state in ("applying", "step_in_progress", "rollback_failed"):
+            if state in ("applying", "step_in_progress", "metadata_in_progress", "rollback_failed"):
                 self._rollback(path.parent, manifest)
                 recovered += 1
                 self._discard(path.parent)
@@ -280,18 +322,27 @@ class ActivationService:
 
     @compatibility.serialized
     @compatibility.recovery_operation
-    def apply(self, entries, token, download_paths=None):
+    def apply(self, entries, token, download_paths=None, metadata=None):
         if self.pending_recovery():
             raise ActivationError("An interrupted switch needs recovery. Recover the previous selection before applying another preset.")
-        plan = self.preview(entries, download_paths)
+        plan = self.preview(entries, download_paths, metadata)
         if plan["token"] != token:
             raise ActivationError("The library or game files changed. Review a fresh preview before applying.")
         if not plan["can_apply"]:
             raise ActivationError("Restore the missing downloads or save a new preset before applying.")
-        if not plan["changes"]:
+        if not plan["changes"] and not plan["metadata"]:
             return {"updated": 0, "missing": 0}
         owned_stems = _stems([pak for change in plan["changes"] for pak in change["before"] + change["after"]])
+        if plan["metadata"]:
+            conn = self.get_db()
+            try:
+                activation_metadata.ensure_receipts(conn)
+            finally:
+                conn.close()
         folder, manifest = self._snapshot(owned_stems)
+        if plan["metadata"]:
+            manifest["metadata"] = True
+            _write(folder / "journal.json", manifest)
 
         def step(download_id, paks):
             manifest["state"] = "step_in_progress"
@@ -325,9 +376,38 @@ class ActivationService:
                 desired = plan["entries"].get(str(row["id"]), [])
                 if _stems(_list(row["active_paks"])) != _stems(desired) or not _stems(desired) <= disk_stems:
                     raise ActivationError(f"The resulting selection for {row['name']} could not be verified.")
+            if plan["metadata"]:
+                manifest["state"] = "metadata_in_progress"
+                _write(folder / "journal.json", manifest)
+                conn = self.get_db()
+                previous_sync = conn.execute("PRAGMA synchronous").fetchone()[0]
+                try:
+                    conn.execute("PRAGMA synchronous=FULL")
+                    conn.execute("BEGIN IMMEDIATE")
+                    activation_metadata.validate(conn, plan["metadata"])
+                    if activation_metadata.fingerprint(conn, plan["metadata"]) != plan["metadata_fingerprint"]:
+                        raise ActivationError("The metadata changed during this restore. Review a fresh preview.")
+                    activation_metadata.apply(conn, plan["metadata"])
+                    conn.execute("INSERT INTO activation_metadata_commits(journal_id) VALUES (?)", (folder.name,))
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+                finally:
+                    try:
+                        conn.execute(f"PRAGMA synchronous={int(previous_sync)}")
+                    finally:
+                        conn.close()
             manifest["state"] = "committed"
             _write(folder / "journal.json", manifest)
         except Exception as error:
+            if self._metadata_committed(folder, manifest):
+                # Never roll back files after metadata has committed. The
+                # receipt lets a later recovery safely finalize this journal.
+                logging.getLogger(__name__).warning("Restore committed; final journal cleanup needs attention: %s", error)
+                self._discard(folder)
+                return {"updated": len(plan["changes"]), "missing": 0}
+
             try:
                 self._rollback(folder, manifest)
             except Exception as rollback_error:

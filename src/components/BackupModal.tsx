@@ -58,7 +58,7 @@ import {
   invokeOpenFileDialog,
   invokeReadTextFile,
 } from "../lib/tauri-utils";
-import { scanActive, refreshConflicts, getModCustomTags, addModCustomTag, getModDetails, fetchModImages, updateModDetails, uploadModImagesBase64, createBackup, restoreBackup, listServerBackups, deleteBackup, listDownloads, getBackupRetention, setBackupRetention } from "../lib/api";
+import { scanActive, refreshConflicts, getModCustomTags, getModDetails, fetchModImages, createBackup, restoreBackup, listServerBackups, deleteBackup, listDownloads, getBackupRetention, setBackupRetention } from "../lib/api";
 
 interface BackupModalProps {
   open: boolean;
@@ -593,72 +593,6 @@ export function BackupModal({
       const previewFiles = () => previewBackupActivation(backup, mods);
       await requestReview(await previewFiles(), previewFiles);
 
-      // Step 3 – Restore custom user data (tags, description, images)
-      for (const mod of mods) {
-        const backupEntry = backup.mods.find(e => {
-          if (e.backendModId != null && mod.backendModId != null) return e.backendModId === mod.backendModId;
-          if (e.sourceDownloadIds.length > 0 && Array.isArray(mod.sourceDownloadIds)) return e.sourceDownloadIds.some((id: number | string) => mod.sourceDownloadIds.includes(id));
-          return String(e.modId) === String(mod.id);
-        });
-        
-        if (!backupEntry) continue; // Only process mods that were in the backup
-
-        const effectiveModId =
-          mod.backendModId != null
-            ? mod.backendModId
-            : Array.isArray(mod.sourceDownloadIds) && mod.sourceDownloadIds.length > 0
-              ? -mod.sourceDownloadIds[0]
-              : null;
-        if (effectiveModId == null) continue;
-
-        // Restore custom tags
-        const savedTags = backupEntry?.customTags || [];
-        if (savedTags.length > 0) {
-          for (const tagName of savedTags) {
-            try { await addModCustomTag(effectiveModId, tagName); } catch { /* already exists or missing mod */ }
-          }
-        }
-
-        // Restore custom description
-        if (backupEntry?.description) {
-          try {
-            await updateModDetails(effectiveModId, { description: backupEntry.description });
-          } catch { /* best effort */ }
-        }
-
-        // Restore custom images.
-        //
-        // The upload endpoint is a plain INSERT with no uniqueness constraint, so
-        // restoring the same backup twice used to append every image again — and
-        // this library stores gigabytes of artwork, so repeat restores grew the
-        // database without bound.
-        //
-        // Dedup is by filename rather than by payload: uploads are re-encoded
-        // server-side before they are stored, so the bytes held in the database
-        // never equal the bytes in the backup file and a content comparison
-        // would report "new" every single time.
-        if (backupEntry?.customImages && backupEntry.customImages.length > 0) {
-          try {
-            const existing = await fetchModImages(effectiveModId);
-            const haveNames = new Set(
-              existing
-                .filter((img) => img.source === "custom" && img.filename)
-                .map((img) => String(img.filename).toLowerCase()),
-            );
-            const missing = backupEntry.customImages.filter(
-              (img) => !img.filename || !haveNames.has(img.filename.toLowerCase()),
-            );
-            if (missing.length > 0) {
-              await uploadModImagesBase64(effectiveModId, missing);
-            }
-          } catch { /* best effort */ }
-        }
-      }
-
-      // Step 4 – Single filesystem sync
-      await scanActive();
-      await refreshConflicts();
-
       setView("restored");
 
       // Notify parent to refresh mod list from backend
@@ -681,7 +615,7 @@ export function BackupModal({
           `Backup restored — ${totalChanges} mod${totalChanges > 1 ? "s" : ""} updated`
         );
       } else {
-        toast.info("Mods already match this backup — no changes needed");
+        toast.success("Backup restored — saved mod details applied");
       }
     } catch (err: any) {
       console.error("Restore failed:", err);

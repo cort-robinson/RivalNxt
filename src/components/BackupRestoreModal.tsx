@@ -12,7 +12,6 @@ import { Badge } from "./ui/badge";
 import { toast } from "sonner";
 import { invokeReadTextFile } from "../lib/tauri-utils";
 import { computeRestoreDiff, type BackupMeta, type ModBackup } from "../lib/backupUtils";
-import { scanActive, refreshConflicts, addModCustomTag, updateModDetails, uploadModImagesBase64, createOrUpdateAuthor, assignModAuthor } from "../lib/api";
 import { Loader2, CheckCircle2, XCircle, RotateCcw } from "lucide-react";
 
 interface BackupRestoreModalProps {
@@ -80,73 +79,10 @@ export function BackupRestoreModal({ meta, installedMods, onComplete, onClose }:
       setStats((value) => ({ ...value, completed }));
       setProgress(90);
 
-      // Restore custom user data (tags, description, images)
-      setCurrentModName("Restoring custom data...");
-      for (const mod of installedMods) {
-        const backupEntry = backup.mods.find(e => {
-          if (e.backendModId != null && mod.backendModId != null) return e.backendModId === mod.backendModId;
-          if (e.sourceDownloadIds.length > 0 && Array.isArray(mod.sourceDownloadIds)) return e.sourceDownloadIds.some((id: number | string) => mod.sourceDownloadIds.includes(id));
-          return String(e.modId) === String(mod.id);
-        });
-
-        if (!backupEntry) continue; // Only process mods that were in the backup
-
-        const effectiveModId =
-          mod.backendModId != null
-            ? mod.backendModId
-            : Array.isArray(mod.sourceDownloadIds) && mod.sourceDownloadIds.length > 0
-              ? -mod.sourceDownloadIds[0]
-              : null;
-        if (effectiveModId == null) continue;
-
-        // Restore custom tags
-        const savedTags = backupEntry?.customTags || [];
-        if (savedTags.length > 0) {
-          for (const tagName of savedTags) {
-            try { await addModCustomTag(effectiveModId, tagName); } catch { /* tag may already exist */ }
-          }
-        }
-
-        // Restore custom description
-        if (backupEntry?.description) {
-          try {
-            await updateModDetails(effectiveModId, { description: backupEntry.description });
-          } catch { /* best effort */ }
-        }
-
-        // Restore custom images.
-        //
-        // The backend skips images this mod already has, so replaying a restore
-        // no longer multiplies the library. Sending them anyway is still wasted
-        // work, but correctness does not depend on this call being careful.
-        if (backupEntry?.customImages && backupEntry.customImages.length > 0) {
-          try {
-            await uploadModImagesBase64(effectiveModId, backupEntry.customImages);
-          } catch { /* best effort */ }
-        }
-
-        // Restore custom author
-        if (backupEntry?.customAuthorName && mod.modKey) {
-          try {
-            const author = await createOrUpdateAuthor({
-              display_name: backupEntry.customAuthorName,
-              author_type: (backupEntry.customAuthorType as any) || "custom",
-              avatar_base64: backupEntry.customAuthorAvatar,
-              // don't try to reuse customAuthorId as it is local DB specific
-            });
-            await assignModAuthor(mod.modKey, author.id);
-          } catch (err) {
-            console.error("Failed to restore custom author:", err);
-          }
-        }
-      }
-
       setStatus("finalizing");
-      setCurrentModName("Synchronizing filesystem...");
+      setCurrentModName("Finishing restore...");
       setProgress(95);
       
-      await scanActive();
-      await refreshConflicts();
       
       setProgress(100);
       setStatus("completed");
