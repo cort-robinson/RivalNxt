@@ -20,7 +20,7 @@ _One desktop app to manage, activate, and validate Marvel Rivals mods with confl
 
 ---
 
-## New in v0.10.0
+## New in v0.10.1
 
 - Preview preset and conflict changes before applying a guarded batch switch.
 - Review persistent operation history, failures, and downloads in **Activity**.
@@ -28,7 +28,7 @@ _One desktop app to manage, activate, and validate Marvel Rivals mods with confl
 - Preview redacted diagnostics before saving a support report.
 - Receive signed app updates from this fork, with a safety backup before installation.
 
-See [release notes](docs/releases/v0.10.0.md) for recovery behavior and verification details.
+See [release notes](docs/releases/v0.10.1.md) for recovery behavior and verification details.
 
 ## ✨ Features
 
@@ -84,7 +84,7 @@ See [release notes](docs/releases/v0.10.0.md) for recovery behavior and verifica
 
 - Go to the **Releases** page.
 - Download the latest setup file, for example:
-  **`RivalNxt_0.10.0_x64-setup.exe`** (or any newer version).
+  **`RivalNxt_0.10.1_x64-setup.exe`** (or any newer version).
 
 ### 2. Install & Launch
 

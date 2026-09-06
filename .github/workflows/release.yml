@@ -66,6 +66,8 @@ jobs:
           npm ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -r requirements.txt -r requirements-dev.txt maturin pyinstaller
+      - name: Verify Tauri dependency alignment
+        run: node scripts/check-tauri-versions.mjs
       - name: Build native Python module
         shell: pwsh
         working-directory: src-tauri/src/rust-ue-tools
