@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useRef } from "react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import {
@@ -13,13 +13,14 @@ import type { Mod } from "./ModCard";
 import {
   checkModUpdate,
 } from "../lib/api";
-import { normalizeVersionForCheck } from "../lib/updateUtils";
+import { distinctPendingUpdates, groupUpdateMods, updateLibraryFingerprint, updateModKey, type PendingModUpdate, type UpdateModGroup } from "../lib/updateUtils";
 import { toast } from "sonner";
 
 interface CheckForUpdatesModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   mods: Mod[];
+  libraryRevision?: number;
   onUpdateMod?: (modId: string, targetFileId?: number) => Promise<void> | void;
   onRefreshMods?: () => void;
   // Controlled state lifted to parent so results survive modal close/reopen
@@ -41,11 +42,13 @@ export type ModUpdateStatus =
 export interface ModStatus {
   status: ModUpdateStatus;
   error?: string;
-  pendingVersions?: { local: string; latest: string; referenceFileId?: number | null; pakName?: string; variantName?: string }[];
+  libraryFingerprint?: string;
+  libraryRevision?: number;
+  pendingVersions?: PendingModUpdate[];
 }
 
 const FALLBACK_IMG =
-  "https://i.pinimg.com/1200x/44/da/5e/44da5e6d9dd75cb753ab5925aff4ce4c.jpg";
+  "/icons/mod-placeholder.svg";
 
 const formatVersionDisplay = (ver: string | undefined | null): string => {
   if (!ver) return "";
@@ -59,6 +62,7 @@ export function CheckForUpdatesModal({
   open,
   onOpenChange,
   mods,
+  libraryRevision = 0,
   onUpdateMod,
   onRefreshMods,
   statuses,
@@ -68,137 +72,118 @@ export function CheckForUpdatesModal({
   isCheckingAll,
   onIsCheckingAllChange,
 }: CheckForUpdatesModalProps) {
-  const installedMods = useMemo(
-    () =>
-      mods.filter(
-        (m) =>
-          m.isInstalled &&
-          typeof m.backendModId === "number" &&
-          m.backendModId > 0,
-      ),
-    [mods],
-  );
-
-  // Keep a ref of statuses to avoid stale closure during async check-all loop
+  const installedMods = useMemo(() => groupUpdateMods(mods), [mods]);
+  const installedRef = useRef(installedMods);
+  installedRef.current = installedMods;
+  const revisionRef = useRef(libraryRevision);
+  revisionRef.current = libraryRevision;
   const statusesRef = useRef(statuses);
   statusesRef.current = statuses;
+  const checkingRef = useRef(false);
+  const [isStartingUpdates, setIsStartingUpdates] = useState(false);
+  const startingRef = useRef(false);
 
-  const setModStatus = useCallback(
-    (modId: string, status: ModUpdateStatus, error?: string, pendingVersions?: { local: string; latest: string; referenceFileId?: number | null }[]) => {
-      const next = { ...statusesRef.current, [modId]: { status, error, pendingVersions } };
-      statusesRef.current = next;
-      onStatusesChange(next);
-    },
-    [onStatusesChange],
-  );
+  const setModStatus = useCallback((mod: Mod, value: Omit<ModStatus, "libraryFingerprint">) => {
+    const fingerprint = updateLibraryFingerprint(mod);
+    const current = installedRef.current.find(m => updateModKey(m) === updateModKey(mod));
+    if (!current || revisionRef.current !== libraryRevision || updateLibraryFingerprint(current) !== fingerprint) return;
+    const next = { ...statusesRef.current, [updateModKey(mod)]: { ...value, libraryFingerprint: fingerprint, libraryRevision } };
+    statusesRef.current = next;
+    onStatusesChange(next);
+  }, [onStatusesChange, libraryRevision]);
 
-  const checkSingleMod = useCallback(
-    async (mod: Mod) => {
-      if (!mod.backendModId) return;
-      setModStatus(mod.id, "checking");
-      try {
-        // checkModUpdate updates the backend's cached update status
-        const result = await checkModUpdate(mod.backendModId);
-        // Use the backend's authoritative needs_update value directly
-        // (same field as mod.hasUpdate) to stay in sync with the sidebar badge
-        if (result?.needs_update) {
-          const pendingVersions = result.pending?.map((p: any) => ({
-            local: p.local_version || "",
-            latest: p.reference_version || "",
-            referenceFileId: typeof p.reference_file_id === "number" ? p.reference_file_id : null,
-            pakName: p.pak_name || "",
-            variantName: p.local_file_name || mod.updateVariantName || p.pak_name || "",
-          })) || [];
-          setModStatus(mod.id, "has-update", undefined, pendingVersions);
-        } else {
-          setModStatus(mod.id, "up-to-date");
-        }
-      } catch (e) {
-        setModStatus(
-          mod.id,
-          "error",
-          e instanceof Error ? e.message : "Check failed",
-        );
-      }
-    },
-    [setModStatus],
-  );
+  const checkSingleMod = useCallback(async (mod: Mod) => {
+    setModStatus(mod, { status: "checking" });
+    try {
+      const result = await checkModUpdate(mod.backendModId!);
+      if (!result.ok || result.metadata_warning) throw new Error(result.metadata_warning || "Update check failed. Try again.");
+      const pending = result.pending as Array<typeof result.pending[number] & { reference_file_id?: number; local_file_name?: string }>;
+      setModStatus(mod, {
+        status: result.needs_update ? "has-update" : "up-to-date",
+        pendingVersions: distinctPendingUpdates((pending || []).map(p => ({
+          local: p.local_version || "", latest: p.reference_version || "",
+          referenceFileId: p.reference_file_id, pakName: p.pak_name || "",
+          variantName: p.local_file_name || p.pak_name || "",
+        }))),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Check failed. Try again.";
+      setModStatus(mod, { status: "error", error: message });
+      if (/429|rate.?limit|request.?limit|quota|too many requests/i.test(message)) return message;
+    }
+  }, [setModStatus]);
 
   const handleCheckAll = useCallback(async () => {
-    if (isCheckingAll || installedMods.length === 0) return;
+    if (checkingRef.current || isCheckingAll || installedMods.length === 0) return;
+    checkingRef.current = true;
     onIsCheckingAllChange(true);
     onCheckedChange(false);
-    // Reset all to idle first
     statusesRef.current = {};
     onStatusesChange({});
-
     const toastId = "check-updates-modal";
-    toast.loading(`Checking 0/${installedMods.length} mods…`, { id: toastId });
-
+    let next = 0;
     let done = 0;
-    for (const mod of installedMods) {
-      await checkSingleMod(mod);
-      done++;
-      toast.loading(`Checking ${done}/${installedMods.length} mods…`, {
-        id: toastId,
-      });
-    }
-
-    toast.dismiss(toastId);
-    onIsCheckingAllChange(false);
-    onCheckedChange(true);
-
-    // Refresh mods so sidebar badge (updatesCount) re-syncs with modal results
-    if (onRefreshMods) {
-      onRefreshMods();
-    }
-  }, [isCheckingAll, installedMods, checkSingleMod, onRefreshMods, onIsCheckingAllChange, onCheckedChange, onStatusesChange]);
-
-  const getDerivedStatus = useCallback((mod: Mod): ModUpdateStatus => {
-    // If a real check-all status exists for this mod, trust it unconditionally.
-    if (statuses[mod.id]) {
-      return statuses[mod.id].status;
-    }
-    // Before a check has been run, surface "has-update" when the backend says so
-    if (mod.hasUpdate) {
-      return "has-update";
-    }
-    return "idle";
-  }, [statuses]);
-
-  // Mods that are confirmed to have updates (either from a manual check or initial load with genuinely different versions)
-  const modsWithUpdates = useMemo(
-    () => installedMods.filter((m) => getDerivedStatus(m) === "has-update"),
-    [installedMods, getDerivedStatus],
-  );
-
-  const visibleMods = useMemo(() => {
-    return installedMods.filter((mod) => {
-      const s = getDerivedStatus(mod);
-      return s === "has-update" || s === "checking" || s === "error";
-    });
-  }, [installedMods, getDerivedStatus]);
-
-  const handleUpdateAll = useCallback(async () => {
-    if (!onUpdateMod) return;
-    
-    toast.success(
-      `Started update for ${modsWithUpdates.length} mod${modsWithUpdates.length !== 1 ? "s" : ""}. Please approve downloads sequentially.`
-    );
-    
-    for (const mod of modsWithUpdates) {
-      // Use the specific file ID from the first pending variant (from check result),
-      // falling back to the grouped mod's latestFileId only if no check was run yet.
-      const modStatus = statuses[mod.id];
-      if (modStatus?.pendingVersions && modStatus.pendingVersions.length > 0) {
-        for (const pending of modStatus.pendingVersions) {
-          await onUpdateMod(mod.id, pending.referenceFileId ?? mod.latestFileId ?? undefined);
+    let rateLimitError: string | undefined;
+    toast.loading(`Checking 0/${installedMods.length} mods…`, { id: toastId });
+    try {
+      await Promise.all(Array.from({ length: Math.min(3, installedMods.length) }, async () => {
+        while (next < installedMods.length) {
+          const mod = installedMods[next++];
+          if (rateLimitError) {
+            setModStatus(mod, { status: "error", error: `Not checked: ${rateLimitError}` });
+          } else {
+            const limited = await checkSingleMod(mod);
+            if (limited) rateLimitError = limited;
+          }
+          toast.loading(`Checking ${++done}/${installedMods.length} mods…`, { id: toastId });
         }
-      } else {
-        await onUpdateMod(mod.id, mod.latestFileId ?? undefined);
-      }
+      }));
+      onCheckedChange(true);
+      onRefreshMods?.();
+    } finally {
+      toast.dismiss(toastId);
+      checkingRef.current = false;
+      onIsCheckingAllChange(false);
     }
-  }, [modsWithUpdates, onUpdateMod, statuses]);
+  }, [isCheckingAll, installedMods, checkSingleMod, setModStatus, onRefreshMods, onIsCheckingAllChange, onCheckedChange, onStatusesChange]);
+
+  const getModStatus = useCallback((mod: Mod) => {
+    const status = statuses[updateModKey(mod)];
+    return status?.libraryFingerprint === updateLibraryFingerprint(mod) && (status.libraryRevision ?? 0) === libraryRevision ? status : undefined;
+  }, [statuses, libraryRevision]);
+  const getDerivedStatus = useCallback((mod: Mod): ModUpdateStatus =>
+    getModStatus(mod)?.status || (mod.hasUpdate ? "has-update" : "idle"), [getModStatus]);
+  const getPending = (mod: UpdateModGroup) => distinctPendingUpdates(getModStatus(mod)?.pendingVersions ?? mod.pendingUpdates);
+  const modsWithUpdates = installedMods.filter(m => getDerivedStatus(m) === "has-update");
+  const errorCount = installedMods.filter(m => getDerivedStatus(m) === "error").length;
+  const incompleteCount = installedMods.filter(m => ["error", "idle"].includes(getDerivedStatus(m))).length;
+  const allUpToDate = checked && incompleteCount === 0 && modsWithUpdates.length === 0 && !isCheckingAll;
+  const visibleMods = installedMods.filter(m => ["has-update", "checking", "error"].includes(getDerivedStatus(m)));
+
+  const handleUpdateAll = async () => {
+    if (!onUpdateMod || startingRef.current) return;
+    startingRef.current = true;
+    setIsStartingUpdates(true);
+    const requested = new Set<string>();
+    try {
+      for (const mod of modsWithUpdates) {
+        const pending = getPending(mod);
+        const targets = pending.length ? pending.map(p => p.referenceFileId ?? undefined) : [mod.latestFileId ?? undefined];
+        for (const target of targets) {
+          const key = `${updateModKey(mod)}:${target ?? "files"}`;
+          if (requested.has(key)) continue;
+          requested.add(key);
+          await onUpdateMod(mod.id, target);
+        }
+      }
+      toast.info("Download requests opened. Updates clear after the new files finish importing.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not start all downloads. Try the remaining files again.");
+    } finally {
+      startingRef.current = false;
+      setIsStartingUpdates(false);
+    }
+  };
 
   // Stats for header
   const totalChecked = installedMods.filter((m) =>
@@ -209,7 +194,7 @@ export function CheckForUpdatesModal({
     ? "linear-gradient(90deg, #8b5cf6, #6366f1)"
     : checked && modsWithUpdates.length > 0
     ? "linear-gradient(90deg, #ef4444, #f97316)"
-    : checked && modsWithUpdates.length === 0
+    : allUpToDate
     ? "linear-gradient(90deg, #22c55e, #10b981)"
     : "linear-gradient(90deg, #3b82f6, #06b6d4)";
 
@@ -217,116 +202,15 @@ export function CheckForUpdatesModal({
     ? "linear-gradient(135deg, rgba(139,92,246,0.15), rgba(99,102,241,0.15))"
     : checked && modsWithUpdates.length > 0
     ? "linear-gradient(135deg, rgba(239,68,68,0.15), rgba(249,115,22,0.15))"
-    : checked && modsWithUpdates.length === 0
+    : allUpToDate
     ? "linear-gradient(135deg, rgba(34,197,94,0.15), rgba(16,185,129,0.15))"
     : "linear-gradient(135deg, rgba(59,130,246,0.15), rgba(6,182,212,0.15))";
 
   const getStatusBadge = (mod: Mod) => {
-    const s = getDerivedStatus(mod);
-    if (s === "checking")
-      return (
-        <span className="flex items-center gap-1.5 text-xs text-violet-400 font-semibold">
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          Checking…
-        </span>
-      );
-    if (s === "has-update") {
-      const modStatus = statuses[mod.id];
-      const hasPending = modStatus?.pendingVersions && modStatus.pendingVersions.length > 0;
-      
-      // If we have specific pending versions from the backend check, use the first one
-      if (hasPending && modStatus.pendingVersions![0].local && modStatus.pendingVersions![0].latest) {
-        const p = modStatus.pendingVersions![0];
-        
-        return (
-          <div className="text-xs flex items-center gap-1.5 font-medium pr-2">
-            <span className="px-2 py-0.5 rounded bg-muted text-muted-foreground border border-border/40 font-semibold">
-              {formatVersionDisplay(p.local)}
-            </span>
-            <span className="text-muted-foreground/60">→</span>
-            <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold animate-pulse">
-              {formatVersionDisplay(p.latest)}
-            </span>
-          </div>
-        );
-      }
-
-      // Initial load: we haven't run the backend check yet, but App.tsx calculated the specific variant needs an update
-      if (mod.updateVariantName && mod.updateVariantLocalVersion && mod.updateVariantLatestVersion) {
-        return (
-          <div className="text-xs flex items-center gap-1.5 font-medium pr-2">
-            <span className="px-2 py-0.5 rounded bg-muted text-muted-foreground border border-border/40 font-semibold">
-              {formatVersionDisplay(mod.updateVariantLocalVersion)}
-            </span>
-            <span className="text-muted-foreground/60">→</span>
-            <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold animate-pulse">
-              {formatVersionDisplay(mod.updateVariantLatestVersion)}
-            </span>
-          </div>
-        );
-      }
-
-      // Fallback: If grouped display versions match, but it has an update
-      if (mod.installedVersion && mod.latestVersion && 
-          normalizeVersionForCheck(mod.installedVersion) === normalizeVersionForCheck(mod.latestVersion)) {
-        return (
-          <div className="text-xs flex items-center gap-1.5 font-medium pr-2">
-            <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold animate-pulse">
-              Variant Update
-            </span>
-          </div>
-        );
-      }
-
-      return (
-        <div className="text-xs flex items-center gap-1.5 font-medium pr-2">
-          {mod.installedVersion ? (
-            <>
-              <span className="px-2 py-0.5 rounded bg-muted text-muted-foreground border border-border/40 font-semibold">
-                {formatVersionDisplay(mod.installedVersion)}
-              </span>
-              {mod.latestVersion && (
-                <>
-                  <span className="text-muted-foreground/60">→</span>
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold animate-pulse">
-                    {formatVersionDisplay(mod.latestVersion)}
-                  </span>
-                </>
-              )}
-            </>
-          ) : (
-            mod.latestVersion && (
-              <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold animate-pulse">
-                {formatVersionDisplay(mod.latestVersion)}
-              </span>
-            )
-          )}
-        </div>
-      );
-    }
-    if (s === "up-to-date")
-      return (
-        <span className="flex items-center gap-1.5 text-xs text-emerald-400 font-semibold">
-          <CheckCircle className="w-3.5 h-3.5" />
-          Up to date
-        </span>
-      );
-    if (s === "error")
-      return (
-        <span
-          className="flex items-center gap-1.5 text-xs text-red-400 font-semibold cursor-help"
-          title={statuses[mod.id]?.error}
-        >
-          <AlertTriangle className="w-3.5 h-3.5" />
-          Failed
-        </span>
-      );
-    // idle
-    return (
-      <span className="text-xs text-muted-foreground/60">
-        Ready
-      </span>
-    );
+    const status = getDerivedStatus(mod);
+    if (status === "checking") return <span className="flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="w-3.5 h-3.5 animate-spin" />Checking…</span>;
+    if (status === "error") return <span className="flex items-center gap-1.5 text-xs text-red-700 dark:text-red-400"><AlertTriangle className="w-3.5 h-3.5" />Check failed</span>;
+    return <span className="text-xs text-muted-foreground">Update available</span>;
   };
 
   return (
@@ -336,7 +220,7 @@ export function CheckForUpdatesModal({
         className="w-full bg-card p-0 flex flex-col shadow-2xl"
         style={{
           maxWidth: "min(900px, 95vw)",
-          minWidth: "600px",
+          minWidth: "min(600px, 95vw)",
           width: "min(900px, 95vw)",
           height: "85vh",
           maxHeight: "85vh",
@@ -381,7 +265,7 @@ export function CheckForUpdatesModal({
                   <Loader2 className="w-5 h-5 text-violet-400 animate-spin" />
                 ) : checked && modsWithUpdates.length > 0 ? (
                   <ArrowUpCircle className="w-5 h-5 text-red-400 animate-pulse" />
-                ) : checked && modsWithUpdates.length === 0 ? (
+                ) : allUpToDate ? (
                   <CheckCircle className="w-5 h-5 text-emerald-400" />
                 ) : (
                   <RefreshCw className="w-5 h-5 text-blue-400" />
@@ -392,13 +276,13 @@ export function CheckForUpdatesModal({
                 <DialogTitle className="text-lg font-semibold tracking-tight">
                   Check for Updates
                 </DialogTitle>
-                <p className="text-xs text-muted-foreground mt-0.5">
+                <DialogDescription className="text-xs text-muted-foreground mt-0.5">
                   {installedMods.length} mod
                   {installedMods.length !== 1 ? "s" : ""} with Nexus IDs
                   {(checked || modsWithUpdates.length > 0)
                     ? ` · ${modsWithUpdates.length} update${modsWithUpdates.length !== 1 ? "s" : ""} available`
                     : ""}
-                </p>
+                </DialogDescription>
               </div>
             </div>
 
@@ -407,7 +291,7 @@ export function CheckForUpdatesModal({
               <Button
                 variant="default"
                 size="sm"
-                disabled={isCheckingAll || modsWithUpdates.length === 0}
+                disabled={isCheckingAll || isStartingUpdates || !onUpdateMod || modsWithUpdates.length === 0}
                 onClick={handleUpdateAll}
                 className="gap-2 transition-all duration-300 hover:shadow-lg hover:shadow-red-500/20 active:scale-[0.98]"
                 style={{
@@ -419,7 +303,7 @@ export function CheckForUpdatesModal({
                 }}
               >
                 <ArrowUpCircle className="w-4 h-4" />
-                Update All
+                {isStartingUpdates ? "Opening downloads…" : "Update All"}
                 {modsWithUpdates.length > 0 && (
                   <Badge
                     variant="secondary"
@@ -433,7 +317,7 @@ export function CheckForUpdatesModal({
               <Button
                 variant="outline"
                 size="sm"
-                disabled={isCheckingAll || installedMods.length === 0}
+                disabled={isCheckingAll || isStartingUpdates || installedMods.length === 0}
                 onClick={handleCheckAll}
                 className="gap-2 transition-all duration-300 hover:bg-accent/50 active:scale-[0.98]"
                 style={{
@@ -496,7 +380,7 @@ export function CheckForUpdatesModal({
                 </p>
               </div>
             </div>
-          ) : checked && visibleMods.length === 0 ? (
+          ) : allUpToDate ? (
             <div className="flex flex-col items-center justify-center h-full gap-3 text-green-500 text-center">
               <CheckCircle className="w-12 h-12 opacity-80 mx-auto animate-pulse" />
               <div>
@@ -510,120 +394,37 @@ export function CheckForUpdatesModal({
             </div>
           ) : (
             <div className="grid gap-2">
-              {visibleMods.flatMap((mod) => {
-                const s = getDerivedStatus(mod);
-                const hasUpdate = s === "has-update";
-                const modStatus = statuses[mod.id];
-                const pendingVersions = modStatus?.pendingVersions || [];
-
-                const renderRow = (pending?: any, idx?: number) => {
-                  const rawFileName = pending?.variantName || mod.updateVariantName || pending?.pakName || mod.latestFileName;
-                  const rowKey = pending ? `${mod.id}-${pending.referenceFileId || idx}` : mod.id;
-
-                  return (
-                    <div
-                      key={rowKey}
-                      className={`group flex items-center gap-4 p-3.5 rounded-xl border transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg ${
-                        hasUpdate
-                          ? "border-red-500/25 bg-red-500/5 hover:border-red-500/40 hover:shadow-red-500/5"
-                          : "border-border/60 bg-card hover:border-border/80 hover:bg-accent/30 hover:shadow-black/5"
-                      }`}
-                    >
-                      {/* Thumbnail */}
-                      <div className="w-14 h-10 rounded-lg overflow-hidden bg-muted flex-shrink-0 border border-border/40 relative">
-                        <img
-                          src={mod.images?.[0] || FALLBACK_IMG}
-                          alt={mod.name}
-                          className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-110"
-                          onError={(e) => {
-                            if (e.currentTarget.src !== FALLBACK_IMG)
-                              e.currentTarget.src = FALLBACK_IMG;
-                          }}
-                          loading="lazy"
-                        />
-                      </div>
-
-                      {/* Name + author + variant */}
+              {checked && incompleteCount > 0 && !isCheckingAll && (
+                <p role="status" className="text-sm text-muted-foreground mb-2">
+                  {errorCount > 0 ? `${errorCount} mod check${errorCount === 1 ? "" : "s"} failed.` : "Your library changed during the check."} Re-check All to refresh the remaining results.
+                </p>
+              )}
+              {visibleMods.map(mod => {
+                const hasUpdate = getDerivedStatus(mod) === "has-update";
+                const pending = getPending(mod);
+                return (
+                  <div key={updateModKey(mod)} className={`p-3.5 rounded-xl border ${hasUpdate ? "border-red-500/25 bg-red-500/5" : "border-border/60 bg-card"}`}>
+                    <div className="flex items-center gap-4">
+                      <img src={mod.images?.[0] || FALLBACK_IMG} alt="" className="w-14 h-10 rounded-lg object-cover flex-shrink-0" loading="lazy" onError={event => { event.currentTarget.onerror = null; event.currentTarget.src = FALLBACK_IMG; }} />
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold truncate leading-tight">
-                          {mod.name}
-                        </p>
-                        <div className="flex items-center gap-2 mt-0.5 min-w-0 text-xs text-muted-foreground">
-                          {mod.author && (
-                            <p className="truncate flex-shrink-0">
-                              by {mod.author}
-                            </p>
-                          )}
-                          {/* Variant file name — shown when it differs meaningfully from the mod name */}
-                          {(() => {
-                            const raw = rawFileName;
-                            if (!raw) return null;
-                            // Strip common file extensions and trim
-                            const clean = raw.replace(/\.(zip|7z|rar|pak|utoc|ucas)$/i, "").trim();
-                            // Only show if it looks different from the mod name
-                            const modNameLower = mod.name.toLowerCase().replace(/\s+/g, "");
-                            const cleanLower = clean.toLowerCase().replace(/\s+/g, "");
-                            if (cleanLower === modNameLower) return null;
-                            // Truncate to 50 chars with ellipsis
-                            const label = clean.length > 50 ? clean.slice(0, 48) + "…" : clean;
-                            return (
-                              <div className="flex items-center gap-2 truncate opacity-80">
-                                <span className="flex-shrink-0">•</span>
-                                <span className="truncate italic" title={clean}>{label}</span>
-                              </div>
-                            );
-                          })()}
-                        </div>
+                        <p className="text-sm font-semibold break-words">{mod.name}</p>
+                        <p className="text-xs text-muted-foreground break-words">{mod.author ? `by ${mod.author}` : ""}</p>
                       </div>
-
-                      {/* Version info */}
-                      {(pending?.local || mod.installedVersion) && !hasUpdate && (
-                        <div className="text-xs hidden sm:flex items-center gap-1.5 flex-shrink-0 font-medium">
-                          <span className="px-2 py-0.5 rounded bg-muted/60 text-muted-foreground border border-border/40">
-                            {formatVersionDisplay(pending?.local || mod.installedVersion)}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Status badge */}
-                      <div className={`flex items-center justify-end flex-shrink-0 ${hasUpdate ? "w-32" : "w-28"}`}>
-                        {getStatusBadge(mod)}
-                      </div>
-
-                      {/* Update button (only when update available) */}
-                      {hasUpdate && onUpdateMod && (
-                        <Button
-                          size="sm"
-                          variant="default"
-                          className="gap-1.5 flex-shrink-0 h-8 text-xs font-semibold transition-all duration-300 hover:shadow-md hover:shadow-red-500/10 active:scale-95 border-none"
-                          style={{
-                            background: "linear-gradient(135deg, #ef4444, #f97316)",
-                            border: "none",
-                          }}
-                          onClick={() => {
-                            onOpenChange(false);
-                            // Add a small delay to ensure modal closure transition doesn't clash with opening the new one
-                            setTimeout(() => {
-                              window.dispatchEvent(
-                                new CustomEvent("open-mod-modal", {
-                                  detail: { modId: mod.id, tab: "files" },
-                                })
-                              );
-                            }, 100);
-                          }}
-                        >
-                          <ArrowUpCircle className="w-3.5 h-3.5" />
-                          Update
-                        </Button>
-                      )}
+                      {getStatusBadge(mod)}
+                      {hasUpdate && onUpdateMod && <Button size="sm" variant="outline" disabled={isCheckingAll || isStartingUpdates} onClick={() => {
+                        onOpenChange(false);
+                        window.dispatchEvent(new CustomEvent("open-mod-modal", { detail: { modId: mod.id, tab: "files" } }));
+                      }}>View files</Button>}
                     </div>
-                  );
-                };
-
-                if (hasUpdate && pendingVersions.length > 0) {
-                  return pendingVersions.map((pending: any, idx: number) => renderRow(pending, idx));
-                }
-                return [renderRow()];
+                    {hasUpdate && pending.length > 0 && <ul className="mt-3 space-y-2 border-t border-border/40 pt-3" aria-label={`${mod.name} file updates`}>
+                      {pending.map((item, index) => <li key={item.referenceFileId ?? index} className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs">
+                        <span className="min-w-0 break-words text-foreground">{item.variantName || item.pakName || "Mod file"}</span>
+                        <span className="text-muted-foreground">{formatVersionDisplay(item.local) || "Installed"} → {formatVersionDisplay(item.latest) || "New file"}</span>
+                      </li>)}
+                    </ul>}
+                    {getDerivedStatus(mod) === "error" && <p className="mt-2 text-xs text-red-700 dark:text-red-400 break-words">{getModStatus(mod)?.error}</p>}
+                  </div>
+                );
               })}
             </div>
           )}

@@ -2089,9 +2089,11 @@ def _ingest_resolved_download(
 	metadata_snapshot: Optional[Dict[str, Any]] = None,
 	filtered_metadata: Optional[Dict[str, Any]] = None,
 	created_at_hint: Optional[Any] = None,
+	nexus_file_id: Optional[int] = None,
 ) -> Dict[str, Any]:
 	"""Ingest a resolved local archive/pak into ``local_downloads`` and related tables."""
 
+	nexus_mod_id = mod_id
 	path = path.resolve()
 	normalized_path = normalize_download_path(path)
 	
@@ -2127,6 +2129,14 @@ def _ingest_resolved_download(
 
 		if duplicate is not None:
 			existing_id, existing_name, existing_version, existing_path = duplicate
+			from core.utils.download_paths import resolve_absolute_download_path
+			duplicate_path = resolve_absolute_download_path(existing_path) if existing_path else None
+			if nexus_file_id and incoming_md5 and duplicate_path and duplicate_path.is_file():
+				# A logical name/version duplicate alone cannot prove a reuploaded file.
+				if compute_file_md5(duplicate_path) == incoming_md5:
+					from core.update_status import record_download_file
+					record_download_file(conn, existing_id, nexus_mod_id, nexus_file_id)
+					conn.commit()
 			raise DuplicateDownloadError(
 				existing_id,
 				existing_name=existing_name,
@@ -2386,7 +2396,7 @@ def _ingest_resolved_download(
 		if synced_mod_id and resolved_mod_id != synced_mod_id:
 			resolved_mod_id = int(synced_mod_id)
 			try:
-				cur.execute("UPDATE local_downloads SET mod_id = ? WHERE id = ?", (resolved_mod_id, local_download_id))
+				cur.execute("UPDATE local_downloads SET mod_id = ?, nexus_file_id = NULL WHERE id = ?", (resolved_mod_id, local_download_id))
 				conn.commit()
 			except Exception:
 				metadata_info.setdefault("metadata_warning", "Failed to link discovered mod ID to local download")
@@ -2450,6 +2460,10 @@ def _ingest_resolved_download(
 		# should re-fetch rather than assume the rebuild completed synchronously.
 		res["conflicts_rebuild_pending"] = bool(conflicts_pending)
 		res.update(metadata_info)
+		if nexus_file_id and contents:
+			from core.update_status import record_download_file
+			record_download_file(conn, local_download_id, nexus_mod_id, nexus_file_id)
+			conn.commit()
 		return res
 	finally:
 		try:
@@ -3637,13 +3651,29 @@ def preview_nxm_handoff(handoff_id: str) -> Dict[str, Any]:
 
 @app.post("/api/mods/{mod_id}/check-update")
 def check_mod_update(mod_id: int) -> Dict[str, Any]:
-	"""Refresh Nexus metadata for a mod and report whether updates are available."""
+	"""Share overlapping requests for one mod; distinct mods may check together."""
+	from core.nexus.request_limits import singleflight
+	if mod_id <= 0:
+		raise HTTPException(status_code=400, detail="Choose a mod linked to Nexus.")
+	return singleflight((str(_get_current_settings().data_dir), mod_id), lambda: _check_mod_update(mod_id))
+
+
+def _check_mod_update(mod_id: int) -> Dict[str, Any]:
 	conn = get_db()
 	try:
-		metadata_info = _sync_mod_metadata(conn, mod_id, None)
+		metadata_info = _sync_mod_metadata(conn, mod_id, None, update_check=True)
+		if metadata_info.get("metadata_warning"):
+			status = metadata_info.get("metadata_status")
+			raise HTTPException(status_code=status if status in (401, 403, 404, 429) else 503,
+				detail=metadata_info["metadata_warning"])
 		rows = fetch_pak_version_status(conn, mod_id=mod_id)
+		from core.update_status import fetch_download_version_status
+		download_rows = fetch_download_version_status(conn, mod_id)
+		indexed_downloads = {row.get("local_download_id") for row in rows}
+		rows.extend(row for row in download_rows if row["local_download_id"] not in indexed_downloads)
 		pending: List[Dict[str, Any]] = []
-		checked_downloads: Set[int] = set()
+		checked_downloads: Set[int] = {row["local_download_id"] for row in download_rows}
+		seen_targets: Set[tuple] = set()
 		for entry in rows:
 			needs_update = bool(entry.get("needs_update"))
 			local_download_id = entry.get("local_download_id")
@@ -3651,6 +3681,11 @@ def check_mod_update(mod_id: int) -> Dict[str, Any]:
 				checked_downloads.add(local_download_id)
 			if not needs_update:
 				continue
+			# Several PAKs in one archive share the same replacement action.
+			target = (local_download_id, entry.get("reference_file_id"), entry.get("reference_version"))
+			if target in seen_targets:
+				continue
+			seen_targets.add(target)
 			pending.append(
 				{
 					"pak_name": entry.get("pak_name"),
@@ -3658,6 +3693,7 @@ def check_mod_update(mod_id: int) -> Dict[str, Any]:
 					"local_version": entry.get("local_version"),
 					"reference_version": entry.get("reference_version"),
 					"reference_file_id": entry.get("reference_file_id"),
+					"local_file_name": entry.get("local_file_name") or entry.get("local_name"),
 					"version_status": entry.get("version_status"),
 					"display_version": entry.get("display_version"),
 				}
@@ -3680,13 +3716,15 @@ def check_mod_update(mod_id: int) -> Dict[str, Any]:
 		# frontend can display an authoritative "Last Check" timestamp.
 		try:
 			from pathlib import Path as _Path
-			_last_check_path = _Path(SETTINGS.data_dir) / "last_update_check.json"
+			_last_check_path = _Path(_get_current_settings().data_dir) / "last_update_check.json"
 			_last_iso = datetime.utcnow().isoformat() + "Z"
+			# Concurrent checks publish a complete timestamp file atomically.
+			with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=_last_check_path.parent, delete=False) as stamp:
+				stamp.write(json.dumps({"last_check": _last_iso}))
 			try:
-				_last_check_path.write_text(json.dumps({"last_check": _last_iso}), encoding="utf-8")
-			except TypeError:
-				# Python <3.11 Path.write_text doesn't accept encoding kw in some envs
-				_last_check_path.write_text(json.dumps({"last_check": _last_iso}))
+				os.replace(stamp.name, _last_check_path)
+			finally:
+				_Path(stamp.name).unlink(missing_ok=True)
 		except Exception:
 			# Non-fatal: log and continue
 			logging.getLogger("modmanager.api.checks").exception(
@@ -3875,6 +3913,7 @@ def ingest_nxm_handoff(handoff_id: str, payload: Optional[Dict[str, Any]] = Body
 			source_url=resolved_url,
 			metadata_snapshot=raw_metadata,
 			filtered_metadata=filtered_metadata,
+			nexus_file_id=file_id,
 			created_at_hint=datetime.now(timezone.utc).isoformat(),
 		)
 	except DownloadCancelledError:
@@ -4464,6 +4503,7 @@ def update_mod(mod_id: int, payload: Optional[Dict[str, Any]] = Body(default=Non
 			mod_id=mod_id,
 			version=latest_version,
 			source_url=download_url,
+			nexus_file_id=latest_file_id,
 			created_at_hint=datetime.now(timezone.utc).isoformat(),
 		)
 	except DuplicateDownloadError as exc:
@@ -7369,6 +7409,8 @@ def list_downloads() -> List[Dict[str, Any]]:
 			logger.warning(f"[list_downloads] Failed to run batch database updates: {update_err}")
 
 	try:
+		from core.update_status import apply_downloaded_update_status
+		apply_downloaded_update_status(conn, out)
 		return out
 	finally:
 		try:
@@ -7602,6 +7644,7 @@ def _sync_mod_metadata(
 	*,
 	pre_fetched: Optional[Dict[str, Any]] = None,
 	filtered_payload: Optional[Dict[str, Any]] = None,
+	update_check: bool = False,
 ) -> Dict[str, Any]:
 	result: Dict[str, Any] = {}
 	try:
@@ -7628,7 +7671,24 @@ def _sync_mod_metadata(
 			if not key:
 				result["metadata_warning"] = "Unable to contact Nexus; no metadata payload available"
 				return result
-			payload = collect_all_for_mod(key, DEFAULT_GAME, resolved_mod_id)
+			if update_check:
+				from core.nexus.nexus_api import collect_for_update
+				payload = collect_for_update(key, DEFAULT_GAME, resolved_mod_id)
+			else:
+				payload = collect_all_for_mod(key, DEFAULT_GAME, resolved_mod_id)
+		# Never replace usable cached files with an HTTP error or partial payload.
+		for section in ("mod_info", "files"):
+			status = payload.get(f"{section}_status", 0)
+			data = payload.get(section)
+			if status != 200 or not isinstance(data, (dict, list)) or (isinstance(data, dict) and data.get("error")):
+				result["metadata_status"] = status
+				result["metadata_warning"] = (f"Nexus could not refresh {section.replace('_', ' ')} (HTTP {status or 'unavailable'}). Cached results were preserved.")
+				if status == 429 and isinstance(data, dict):
+					result["metadata_warning"] = f"Nexus request limit reached. Try again in {data.get('retry_after') or 60} seconds."
+				return result
+		files = payload["files"]
+		if update_check and not (files.get("files") if isinstance(files, dict) else files):
+			return {"metadata_warning": "Nexus returned no files; updates could not be confirmed. Cached results were preserved."}
 		if filtered_payload is not None:
 			filtered = filtered_payload
 		else:
@@ -7647,7 +7707,8 @@ def _sync_mod_metadata(
 			isinstance(changelogs_payload, dict) and not changelogs_payload.get("changelogs")
 		):
 			changelogs_payload = derive_changelogs_from_files(filtered.get("files"))
-		replace_mod_changelogs(conn, resolved_mod_id, changelogs_payload)
+		if not update_check:
+			replace_mod_changelogs(conn, resolved_mod_id, changelogs_payload)
 		result["synced_mod_id"] = resolved_mod_id
 		return result
 	except Exception as e:
@@ -10023,7 +10084,7 @@ def get_local_download(download_id: int) -> Dict[str, Any]:
 		elif latest_version and (version or "").strip():
 			needs_update = latest_version.strip() != (version or "").strip()
 
-		return {
+		result = {
 			"id": id_,
 			"name": name,
 			"mod_id": mod_id,
@@ -10043,6 +10104,9 @@ def get_local_download(download_id: int) -> Dict[str, Any]:
 			"local_version_key": local_version_key,
 			"needs_update": needs_update,
 		}
+		from core.update_status import apply_downloaded_update_status
+		apply_downloaded_update_status(conn, [result])
+		return result
 	finally:
 		try:
 			conn.close()

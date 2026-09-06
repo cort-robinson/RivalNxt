@@ -214,3 +214,27 @@ def test_extraction_failure_is_reported_not_swallowed(
     assert result["ok"] is True
     assert "ingest_warning" in result, result
     assert "corrupt archive" in result["ingest_warning"]
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_known_nexus_ingestion_records_exact_file_identity(
+    ingest_harness, schema_db, tmp_path, monkeypatch, duplicate
+):
+    monkeypatch.setattr("core.utils.download_paths.known_download_roots", lambda: [tmp_path])
+    monkeypatch.setattr(server, "_schedule_conflict_rebuild", lambda **kwargs: False)
+    archive = tmp_path / "Identity-77-2-0.zip"
+    archive.write_bytes(b"PK\x03\x04known identical file")
+    first = server._ingest_resolved_download(
+        archive, name="Identity", mod_id=77, version="2.0",
+        nexus_file_id=None if duplicate else 999,
+    )
+    if duplicate:
+        with pytest.raises(server.DuplicateDownloadError):
+            server._ingest_resolved_download(
+                archive, name="Identity", mod_id=77, version="2.0", nexus_file_id=999,
+            )
+    recorded = schema_db.execute(
+        "SELECT nexus_file_id, nexus_file_fingerprint FROM local_downloads WHERE id=?", (first["download_id"],)
+    ).fetchone()
+    assert recorded[0] == 999
+    assert recorded[1]

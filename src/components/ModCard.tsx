@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import type { SyntheticEvent } from "react";
+import type { PendingModUpdate } from "../lib/updateUtils";
 import { Card, CardContent } from "./ui/card";
 import { Button } from "./ui/button";
 // Badge is used by TagList; not needed directly here
@@ -64,6 +65,7 @@ export interface Mod {
   contents?: string[];
   performanceImpact?: number; // 1-5 scale for performance impact
   needsUpdate?: boolean;
+  pendingUpdates?: PendingModUpdate[];
   updateVariantName?: string | null;
   updateVariantLocalVersion?: string | null;
   updateVariantLatestVersion?: string | null;

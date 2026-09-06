@@ -12,7 +12,7 @@ is the Python side of the same number, and the test suite asserts the two agree.
 """
 from __future__ import annotations
 
-APP_VERSION = "0.10.2"
+APP_VERSION = "0.10.3"
 
 #: Sent to Nexus as User-Agent / Application-Name so their side can attribute
 #: traffic to this client.

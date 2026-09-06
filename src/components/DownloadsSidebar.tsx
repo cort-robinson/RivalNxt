@@ -57,6 +57,7 @@ interface DownloadsSidebarProps {
   onCustomTagToggle?: (tag: string) => void;
   mods: Mod[];
   conflictsReloadToken?: number;
+  updateLibraryRevision?: number;
   onRefreshMods?: () => void;
   onUpdateMod?: (modId: string, targetFileId?: number) => void;
 }
@@ -103,6 +104,7 @@ export function DownloadsSidebar({
   onCustomTagToggle,
   mods,
   conflictsReloadToken = 0,
+  updateLibraryRevision = 0,
   onRefreshMods,
   onUpdateMod,
 }: DownloadsSidebarProps) {
@@ -733,6 +735,7 @@ export function DownloadsSidebar({
           </Button>
           {/* CheckForUpdatesModal */}
           <CheckForUpdatesModal
+            libraryRevision={updateLibraryRevision}
             open={checkUpdatesModalOpen}
             onOpenChange={setCheckUpdatesModalOpen}
             mods={mods}

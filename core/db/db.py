@@ -964,9 +964,13 @@ def versions_equivalent(local: Optional[str], reference: Optional[str]) -> bool:
 def replace_local_downloads(conn: sqlite3.Connection, rows: Iterable[Dict[str, Any]]) -> int:
     cur = conn.cursor()
     existing: Dict[str, int] = {}
-    for path, ident in cur.execute("SELECT path, id FROM local_downloads;"):
+    identities = {}
+    for path, ident, nexus_id, fingerprint, old_mod, old_name, old_version in cur.execute(
+        "SELECT path, id, nexus_file_id, nexus_file_fingerprint, mod_id, name, version FROM local_downloads;"
+    ):
         if isinstance(path, str) and ident is not None:
             existing[path] = int(ident)
+            identities[path] = (nexus_id, fingerprint, old_mod, old_name, old_version)
     inserted = 0
     seen_paths: Set[str] = set()
     max_id_row = cur.execute("SELECT COALESCE(MAX(id), 0) FROM local_downloads;").fetchone()
@@ -1083,11 +1087,22 @@ def replace_local_downloads(conn: sqlite3.Connection, rows: Iterable[Dict[str, A
         ]
         created_at_iso = resolve_created_at(path=fs_path, hints=created_at_hints)
 
+        from core.update_status import download_source_fingerprint
+        previous = identities.get(path)
+        preserve_identity = bool(
+            previous and previous[0] and previous[1]
+            and previous[1] == download_source_fingerprint(str(fs_path or path), contents_json)
+            and (mod_id_int is None or previous[2] == mod_id_int)
+            and previous[3] == name
+            and (version is None or previous[4] == version)
+        )
         cur.execute(
             """
             INSERT INTO local_downloads(path, id, name, mod_id, version, contents, active_paks, created_at)
             VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path) DO UPDATE SET
+                nexus_file_id=CASE WHEN ? THEN local_downloads.nexus_file_id ELSE NULL END,
+                nexus_file_fingerprint=CASE WHEN ? THEN local_downloads.nexus_file_fingerprint ELSE NULL END,
                 id=excluded.id,
                 name=excluded.name,
                 -- A rescan often cannot read an id out of the filename: the
@@ -1104,7 +1119,7 @@ def replace_local_downloads(conn: sqlite3.Connection, rows: Iterable[Dict[str, A
                 created_at=COALESCE(excluded.created_at, local_downloads.created_at)
             ;
             """,
-            (path, assigned_id, name, mod_id_int, version, contents_json, active_paks_json, created_at_iso),
+            (path, assigned_id, name, mod_id_int, version, contents_json, active_paks_json, created_at_iso, preserve_identity, preserve_identity),
         )
         existing[path] = assigned_id
         inserted += 1
@@ -1224,6 +1239,8 @@ def fetch_pak_version_status(
                 entry["needs_update"] = False
                 entry["version_status"] = "local_newer_or_equal"
         results.append(entry)
+    from core.update_status import apply_downloaded_update_status
+    apply_downloaded_update_status(conn, results)
     return results
 
 def _get_mods_folder_for_deletion() -> Optional[Path]:

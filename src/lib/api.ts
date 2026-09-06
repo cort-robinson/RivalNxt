@@ -1403,6 +1403,8 @@ export type ApiCheckModUpdateResponse = {
   pending: Array<{
     pak_name?: string | null;
     local_download_id?: number | null;
+    reference_file_id?: number | null;
+    local_file_name?: string | null;
     local_version?: string | null;
     reference_version?: string | null;
     version_status?: string | null;

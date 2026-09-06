@@ -1,3 +1,4 @@
+import { readLatest } from "./lib/latestRead";
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -214,6 +215,8 @@ type BackendStatusState = {
 export default function App() {
   // State management
   const [mods, setMods] = useState<any[]>([]);
+  const [updateLibraryRevision, setUpdateLibraryRevision] = useState(0);
+  const latestModsRead = useRef<Promise<any[]> | null>(null);
   const [activeTab, setActiveTab] = useState<
     "downloads" | "active" | "collections" | "nexus"
   >("downloads");
@@ -325,6 +328,7 @@ export default function App() {
   useEffect(() => {
     if (!backendReady) return;
     const handler = async () => {
+      setUpdateLibraryRevision(value => value + 1);
       await refreshModsRef.current().catch(() => null);
     };
     window.addEventListener("refresh-downloads", handler);
@@ -943,9 +947,12 @@ export default function App() {
   };
 
   // Event handlers
-  async function fetchServerMods(): Promise<any[]> {
-    // Keep the ref updated so the refresh-downloads event handler always uses the latest version
+  function fetchServerMods(): Promise<any[]> {
     fetchServerModsRef.current = fetchServerMods;
+    return readLatest(fetchServerModsData(), latestModsRead);
+  }
+
+  async function fetchServerModsData(): Promise<any[]> {
     // Start fetching downloads and favourites in parallel
     const [downloads, favouritedIds] = await Promise.all([
       listDownloads(),
@@ -1175,6 +1182,8 @@ export default function App() {
         duration: 4000,
       });
 
+      // Invalidate older check results, including same-ID duplicate ingestion.
+      setUpdateLibraryRevision(value => value + 1);
       // Clear the spinner flag right away so the card updates instantly
       setMods((prev) =>
         prev.map((mod) =>
@@ -1400,6 +1409,8 @@ export default function App() {
                 }
               }
 
+              setUpdateLibraryRevision(value => value + 1);
+              void refreshMods({ quiet: true, skipScan: true });
               // Clear update state
               setMods((prev) =>
                 prev.map((mod) =>
@@ -1415,13 +1426,13 @@ export default function App() {
 
               // Show info toast instead of error
               if (toastId != null) {
-                toast.info(`${displayName} already up to date`, {
+                toast.info(`${displayName}: download already exists`, {
                   id: toastId,
                   description: duplicateMessage,
                   duration: 4000,
                 });
               } else {
-                toast.info(`${displayName} already up to date`, {
+                toast.info(`${displayName}: download already exists`, {
                   description: duplicateMessage,
                   duration: 4000,
                 });
@@ -1500,12 +1511,11 @@ export default function App() {
       const result = await checkModUpdate(backendModId);
       if (result.needs_update) {
         toast.info(`Update available for ${displayName}`);
-        await refreshMods({ quiet: true });
-        // Force sidebar summary refresh to update the "needs update" count
-        setConflictsReloadToken((t) => t + 1);
       } else {
         toast.success(`${displayName} is up to date`);
       }
+      await refreshMods({ quiet: true, skipScan: true });
+      setConflictsReloadToken((t) => t + 1);
     } catch (error) {
       const message =
         error instanceof Error && error.message
@@ -1818,6 +1828,7 @@ export default function App() {
   );
 
   const handleRefresh = (opts?: { skipScan?: boolean }) => {
+    setUpdateLibraryRevision(value => value + 1);
     void refreshMods({ includeConflicts: !opts?.skipScan, skipScan: opts?.skipScan });
     void fetchCollectionsCount();
   };
@@ -2084,6 +2095,7 @@ export default function App() {
       contents: d.contents || [],
       performanceImpact: undefined,
       needsUpdate: hasUpdate,
+      pendingUpdates: (d as any).pendingUpdates,
       updateVariantName: (d as any).updateVariantName ?? null,
       updateVariantLocalVersion: (d as any).updateVariantLocalVersion ?? null,
       updateVariantLatestVersion: (d as any).updateVariantLatestVersion ?? null,
@@ -2399,17 +2411,20 @@ export default function App() {
     // Final pass: Re-calculate needs_update for all grouped mods based on full variant knowledge
     for (const merged of out) {
       const variants = (merged as any).local_variants || [merged];
-      let hasRealUpdate = false;
-      for (const variant of variants) {
-        if (variant.needs_update) {
-          hasRealUpdate = true;
-          (merged as any).updateVariantName = variant.name || variant.mod_name || "";
-          (merged as any).updateVariantLocalVersion = variant.version || "";
-          (merged as any).updateVariantLatestVersion = variant.latest_version || "";
-          break;
-        }
-      }
-      merged.needs_update = hasRealUpdate;
+      const pendingUpdates = (variants as ApiDownload[])
+        .filter((variant) => variant.needs_update)
+        .map((variant) => ({
+          local: variant.version || "",
+          latest: variant.latest_version || "",
+          referenceFileId: variant.latest_file_id ?? null,
+          variantName: variant.name || variant.mod_name || "",
+        }));
+      (merged as any).pendingUpdates = pendingUpdates;
+      const first = pendingUpdates[0];
+      (merged as any).updateVariantName = first?.variantName ?? null;
+      (merged as any).updateVariantLocalVersion = first?.local ?? null;
+      (merged as any).updateVariantLatestVersion = first?.latest ?? null;
+      merged.needs_update = pendingUpdates.length > 0;
     }
 
     return out;
@@ -2511,13 +2526,14 @@ export default function App() {
               onCategoryChange={handleCategoryChange}
               installedCounts={installedCounts}
               updatesCount={updatesCount}
+              updateLibraryRevision={updateLibraryRevision}
               selectedCharacters={selectedCharacters}
               onCharacterToggle={handleCharacterToggle}
               selectedCustomTags={selectedCustomTags}
               onCustomTagToggle={handleCustomTagToggle}
               mods={mods}
               conflictsReloadToken={conflictsReloadToken}
-              onRefreshMods={handleRefresh}
+              onRefreshMods={() => void refreshMods({ quiet: true, skipScan: true })}
               onUpdateMod={handleUpdate}
             />
 
